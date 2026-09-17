@@ -34,6 +34,7 @@ DEFAULTS = {
     "start": "00:05:00",
     "dur": 20,
     "tag": "",
+    "est_cost": 0.0,   # 送件當下的估算，完成後跟實際對照
     # 參數掃描
     "crfs": [28, 30, 32, 34, 36],
     "ref": "",
@@ -60,6 +61,7 @@ def build(name: str, **over) -> dict:
     p["cpu"] = int(p["cpu"])
     p["dur"] = int(p["dur"])
     p["test"] = bool(p["test"])
+    p["est_cost"] = float(p.get("est_cost") or 0)
     p["mem"] = p["cpu"] * 1024
 
     stem = os.path.splitext(name)[0]
@@ -190,6 +192,8 @@ def read_job(d, job_id: str, snap=None) -> dict:
         "size": meta.get("size", 0),
         "src_duration": meta.get("src_duration", 0),
         "out_duration": meta.get("out_duration", 0),
+        "usage": meta.get("usage") or {},
+        "est_cost": sub.get("params", {}).get("est_cost", 0),
         "warning": meta.get("warning", ""),
         "error": meta.get("error", ""),
         "updated": meta.get("updated", 0),

@@ -550,6 +550,7 @@ function estimate() {
   const n = Math.max(1, Math.ceil(dur / chunk));
   const hrs = (dur / speed) / 3600;
   const cost = hrs * (cpu * 0.0000131 + cpu * 0.00000222) * 3600;
+  window._estCost = cost;
   const b = window._budget;
   const after = b ? b.remaining - cost : null;
   $("estimate").innerHTML =
@@ -566,7 +567,7 @@ async function submitJob() {
     preset: +$("preset").value, crf: +$("crf").value, gop: +$("gop").value,
     chunk_sec: +$("chunk_sec").value, cpu: +$("cpu").value, svt: $("svt").value,
     test: $("test").checked, start: $("start").value, dur: +$("dur").value,
-    tag: $("tag").value || "",
+    tag: $("tag").value || "", est_cost: window._estCost || 0,
   };
   if (!body.name) return toast("先選一個來源檔", true);
   $("go").disabled = true;
@@ -823,6 +824,22 @@ function activeCard(j) {
   </div>`;
 }
 
+// 實際花費只含成功跑完的容器 —— 被搶佔中途死掉的不會回報，所以是下限。
+// 跟預估並列才看得出估算準不準，也看得出有沒有被搶佔重跑。
+function costLine(j) {
+  const u = j.usage || {};
+  if (!u.cost) return "";
+  const est = j.est_cost || 0;
+  const diff = est ? ((u.cost / est - 1) * 100) : null;
+  const money = v => "$" + v.toFixed(v < 0.1 ? 3 : 2);   // 掃描的錢很小，兩位不夠看
+  return `<div class="muted mono">實際 ${money(u.cost)}`
+    + (est ? `　預估 ${money(est)}　<span style="color:${
+        diff > 25 ? "var(--err)" : "var(--dim)"}">${diff >= 0 ? "+" : ""}${diff.toFixed(0)}%</span>` : "")
+    + `　·　容器 ${Math.round(u.core_seconds / 3600 * 10) / 10} 核時`
+    + (u.retries ? `　·　<span style="color:var(--err)">被搶佔重跑 ${u.retries} 次</span>` : "")
+    + `</div>`;
+}
+
 function histRow(j) {
   const [text, cls] = STATE[j.state] || [j.state, "idle"];
   return `<div class="spread" style="padding:11px 0;border-bottom:1px solid var(--line-soft)">
@@ -830,6 +847,7 @@ function histRow(j) {
       <div class="row"><span style="font-size:14px">${esc(j.out_name || j.name)}</span>
         <span class="pill ${cls}">${text}</span></div>
       <div class="muted mono">${j.job_id}${j.size ? "　·　" + mib(j.size) : ""}</div>
+      ${costLine(j)}
       ${j.warning ? `<div class="warn">${esc(j.warning)}</div>` : ""}
       ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
     </div>

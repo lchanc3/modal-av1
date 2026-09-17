@@ -38,6 +38,22 @@ BASE_SVT = "tune=0:enable-overlays=1:enable-qm=1:film-grain=0"
 
 HOUR = 3600
 
+# Modal 的基本費率（可搶佔）。nonpreemptible 是 3 倍。
+RATE_CPU_S = 0.0000131      # 美元 / 實體核心 / 秒
+RATE_MEM_S = 0.00000222     # 美元 / GiB / 秒
+
+
+def _usage(t0: float, cpu: float, mem_mib: int, nonpreemptible: bool = False) -> dict:
+    """一個階段實際用掉的資源與費用。
+
+    注意這只涵蓋「成功跑完」的容器 —— 被搶佔而中途死掉的那些不會回報，
+    所以這個數字是下限，跟帳單的差額就是重跑浪費掉的部分。
+    """
+    el = time.time() - t0
+    rate = cpu * RATE_CPU_S + (mem_mib / 1024.0) * RATE_MEM_S
+    return {"elapsed": round(el, 1), "cpu": cpu, "mem": mem_mib,
+            "cost": round(rate * el * (3 if nonpreemptible else 1), 5)}
+
 
 # --------------------------------------------------------------------------
 # 內容定址
@@ -170,6 +186,7 @@ def split(name: str, chunk_sec: int) -> dict:
     避免逐段複製音訊累積出同步漂移。
     切好的結果附一份 manifest，下次同樣的來源與段長就直接沿用。
     """
+    t0 = time.time()
     work = work_dir(name, chunk_sec)
     src = "/data/in/{}".format(name)
     vol.reload()
@@ -182,7 +199,8 @@ def split(name: str, chunk_sec: int) -> dict:
             if (man.get("src_size") == src_size
                     and all(os.path.exists("{}/{}".format(work, f)) for f in man["parts"])):
                 print("沿用既有切段：{} 段".format(len(man["parts"])))
-                return {"work": work, "parts": man["parts"], "reused": True}
+                return {"work": work, "parts": man["parts"], "reused": True,
+                        "usage": _usage(t0, 4, 4096)}
         except Exception as e:
             print("manifest 壞了，重新切段：", repr(e))
 
@@ -200,7 +218,7 @@ def split(name: str, chunk_sec: int) -> dict:
     vol.commit()
 
     print("切成 {} 段".format(len(parts)))
-    return {"work": work, "parts": parts, "reused": False}
+    return {"work": work, "parts": parts, "reused": False, "usage": _usage(t0, 4, 4096)}
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=8, memory=8192,
@@ -210,9 +228,17 @@ def encode_chunk(arg: dict) -> str:
 
     已經編好且長度正確的段落直接沿用 —— 這是取消後重送不必從頭再來的關鍵。
     """
+    t0 = time.time()
     job_id, idx, src, p = arg["job_id"], arg["idx"], arg["src"], arg["params"]
     work, key = arg["work"], arg["enc_key"]
+    cpu, mem = p.get("cpu") or 8, p.get("mem") or 8192
     vol.reload()
+
+    # 被搶佔重跑會再進來一次。同一段不會同時有兩個容器，所以這裡讀了再寫是安全的。
+    prev = jobs.get("job:{}:chunk:{}".format(job_id, idx)) or {}
+    attempt = (prev.get("attempt") or 0) + 1
+    if attempt > 1:
+        print("第 {} 段第 {} 次嘗試（前一次被中斷）".format(idx, attempt))
 
     total = _duration("{}/{}".format(work, src))
     out_name = "enc_{}_{}".format(key, src[len("src_"):])
@@ -222,33 +248,39 @@ def encode_chunk(arg: dict) -> str:
         try:
             if abs(_duration(dst) - total) < 0.05:
                 print("沿用第 {} 段".format(idx))
+                u = _usage(t0, cpu, mem)
                 _put_chunk(job_id, idx, state="done", pct=100.0, out_time=total,
-                           fps=0.0, total=total, size=os.path.getsize(dst), reused=True)
-                return out_name
+                           fps=0.0, total=total, size=os.path.getsize(dst), reused=True,
+                           attempt=attempt, **u)
+                return {"name": out_name, "usage": u, "attempt": attempt, "reused": True}
             print("第 {} 段長度不符，重編".format(idx))
         except Exception as e:
             print("第 {} 段檢查失敗，重編：{!r}".format(idx, e))
 
     tmp = "/tmp/{}".format(out_name)
     # 重跑時 pct 歸零，網頁上就看得出這段被搶佔過
-    _put_chunk(job_id, idx, state="encoding", pct=0.0, out_time=0.0, fps=0.0, total=total)
+    _put_chunk(job_id, idx, state="encoding", pct=0.0, out_time=0.0, fps=0.0,
+               total=total, attempt=attempt)
 
     _encode_with_progress(
         _encode_cmd("{}/{}".format(work, src), tmp, p), total,
-        lambda pct, secs, fps: _put_chunk(job_id, idx, state="encoding",
-                                          pct=pct, out_time=secs, fps=fps, total=total))
+        lambda pct, secs, fps: _put_chunk(job_id, idx, state="encoding", pct=pct,
+                                          out_time=secs, fps=fps, total=total,
+                                          attempt=attempt))
 
     _publish(tmp, dst)
     vol.commit()
+    u = _usage(t0, cpu, mem)
     _put_chunk(job_id, idx, state="done", pct=100.0, out_time=total, fps=0.0,
-               total=total, size=os.path.getsize(tmp), reused=False)
-    return out_name
+               total=total, size=os.path.getsize(tmp), reused=False, attempt=attempt, **u)
+    return {"name": out_name, "usage": u, "attempt": attempt, "reused": False}
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=4, memory=4096,
               timeout=2 * HOUR, retries=2)
 def merge(name: str, work: str, enc_files: list, out_name: str) -> dict:
     """concat 各段，再把原片的音軌/字幕 mux 回去。"""
+    t0 = time.time()
     vol.reload()
 
     with open("/tmp/list.txt", "w") as f:
@@ -292,7 +324,8 @@ def merge(name: str, work: str, enc_files: list, out_name: str) -> dict:
     print("完成：out/{} {:.1f} MiB".format(out_name, size / 2 ** 20))
     return {"out": "out/{}".format(out_name), "size": size,
             "src_duration": src_d, "out_duration": out_d, "parts_duration": parts_d,
-            "chunks_merged": len(enc_files), "warning": warning}
+            "chunks_merged": len(enc_files), "warning": warning,
+            "usage": _usage(t0, 4, 4096)}
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=8, memory=8192,
@@ -302,6 +335,7 @@ def encode_clip(job_id: str, name: str, p: dict, out_name: str) -> dict:
 
     舊版的 --test 只改輸出檔名、完全沒切片段，結果每次「測試」都在轉全片。
     """
+    t0 = time.time()
     tmp = "/tmp/{}".format(out_name)
     total = float(p["dur"])
     _put_chunk(job_id, 0, state="encoding", pct=0.0, out_time=0.0, fps=0.0, total=total)
@@ -322,7 +356,8 @@ def encode_clip(job_id: str, name: str, p: dict, out_name: str) -> dict:
                total=total, size=size, reused=False)
     print("完成：out/{} {:.1f} MiB {:.2f}s".format(out_name, size / 2 ** 20, out_d))
     return {"out": "out/{}".format(out_name), "size": size,
-            "src_duration": total, "out_duration": out_d, "warning": ""}
+            "src_duration": total, "out_duration": out_d, "warning": "",
+            "usage": _usage(t0, p.get("cpu") or 8, p.get("mem") or 8192)}
 
 
 # --------------------------------------------------------------------------
@@ -337,6 +372,7 @@ def make_ref(name: str, start: str, dur: int) -> dict:
     有了它就不必在本機切好再上傳。無損（-qp 0）所以體積大，但只有 20 秒，
     而且打分時它是基準，不能有任何壓縮損失。
     """
+    t0 = time.time()
     stem = os.path.splitext(os.path.basename(name))[0].replace(" ", "_")
     out = "ref_{}_{}s.mkv".format(stem, dur)
     tmp = "/tmp/" + out
@@ -350,7 +386,8 @@ def make_ref(name: str, start: str, dur: int) -> dict:
             if abs(d - dur) < 1.0:
                 print("沿用既有 ref：in/{}".format(out))
                 return {"ref": "in/{}".format(out), "ref_name": out,
-                        "size": os.path.getsize(dst), "out_duration": d, "reused": True}
+                        "size": os.path.getsize(dst), "out_duration": d, "reused": True,
+                        "usage": _usage(t0, 4, 4096)}
         except Exception as e:
             print("既有 ref 檢查失敗，重切：", repr(e))
 
@@ -364,14 +401,17 @@ def make_ref(name: str, start: str, dur: int) -> dict:
     size = os.path.getsize(tmp)
     print("ref 完成：in/{} {:.1f} MiB".format(out, size / 2 ** 20))
     return {"ref": "in/{}".format(out), "ref_name": out,
-            "size": size, "out_duration": _duration(tmp), "reused": False}
+            "size": size, "out_duration": _duration(tmp), "reused": False,
+            "usage": _usage(t0, 4, 4096)}
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=8, memory=8192,
               timeout=4 * HOUR, retries=2)
 def sweep_one(arg: dict) -> dict:
     """用一個 crf 編整支 ref，然後當場打分。編碼與打分在同一個容器裡完成。"""
+    t0 = time.time()
     job_id, idx, crf, p, ref = arg["job_id"], arg["idx"], arg["crf"], arg["params"], arg["ref"]
+    cpu, mem = p.get("cpu") or 8, p.get("mem") or 8192
     vol.reload()
 
     src = "/data/{}".format(ref)
@@ -392,10 +432,11 @@ def sweep_one(arg: dict) -> dict:
     v = _vmaf(tmp, src)
     size = os.path.getsize(tmp)
 
-    mark(state="done", pct=100.0, out_time=total, fps=0.0, size=size, **v)
+    u = _usage(t0, cpu, mem)
+    mark(state="done", pct=100.0, out_time=total, fps=0.0, size=size, **v, **u)
     print("crf {} → {:.1f} MiB, VMAF 平均 {:.2f} / 最低 {:.2f}".format(
         crf, size / 2 ** 20, v["vmaf_mean"], v["vmaf_min"]))
-    return dict(crf=crf, size=size, **v)
+    return dict(crf=crf, size=size, usage=u, **v)
 
 
 # --------------------------------------------------------------------------
@@ -412,6 +453,28 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
     """
     key = "job:{}".format(job_id)
     state = {}
+    t_job = time.time()
+    stages = []          # 每個成功跑完的容器回報的用量
+
+    def account(label, res):
+        """把一個階段的用量收進來，並回傳原本的結果。"""
+        u = (res or {}).get("usage")
+        if u:
+            stages.append(dict(u, stage=label))
+        return res
+
+    def totals():
+        """實際用量。只含成功跑完的容器 —— 被搶佔中途死掉的不會回報，
+        所以這是下限，跟帳單的差額就是重跑浪費掉的。"""
+        drv = _usage(t_job, 0.25, 512, nonpreemptible=True)
+        all_stages = stages + [dict(drv, stage="driver")]
+        return {
+            "cost": round(sum(x["cost"] for x in all_stages), 4),
+            "core_seconds": round(sum(x["cpu"] * x["elapsed"] for x in all_stages)),
+            "wall": round(time.time() - t_job),
+            "stages": [{"stage": x["stage"], "cpu": x["cpu"],
+                        "elapsed": x["elapsed"], "cost": x["cost"]} for x in all_stages],
+        }
 
     def meta(**kw):
         """driver 是這個 key 的唯一 writer，所以狀態留在本地、每次整份寫出去。
@@ -430,8 +493,8 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
 
         if mode == "ref":
             meta(state="encoding", kind="ref", total_chunks=0)
-            res = make_ref.remote(name, p["start"], p["dur"])
-            meta(state="done", **res)
+            res = account("ref", make_ref.remote(name, p["start"], p["dur"]))
+            meta(state="done", usage=totals(), **res)
             return res
 
         if mode == "sweep":
@@ -442,7 +505,7 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
             ref = p.get("ref")
             if not ref:
                 meta(state="splitting", kind="sweep", total_chunks=len(crfs))
-                r = make_ref.remote(name, p["start"], p["dur"])
+                r = account("ref", make_ref.remote(name, p["start"], p["dur"]))
                 ref = r["ref"]
                 meta(ref=ref, ref_reused=r.get("reused", False))
 
@@ -458,6 +521,8 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
                 raise RuntimeError("有 {} 個 crf 失敗：{}".format(
                     len(bad), "；".join("crf {} {!r}".format(crfs[i], r) for i, r in bad[:3])))
 
+            for r in rows:
+                account("crf {}".format(r["crf"]), r)
             rows.sort(key=lambda r: r["crf"])
             # 邊際取捨：固定門檻只告訴你過或不過，看不到附近的性價比
             for i, r in enumerate(rows):
@@ -471,18 +536,18 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
 
             res = {"table": rows, "pick": pick, "ref": ref,
                    "min_mean": p["min_mean"], "min_low": p["min_low"]}
-            meta(state="done", **res)
+            meta(state="done", usage=totals(), **res)
             return res
 
         if p.get("test"):
             meta(state="encoding", total_chunks=1)
-            res = encode_clip.with_options(cpu=cpu, memory=mem).remote(
-                job_id, name, p, p["out_name"])
-            meta(state="done", **res)
+            res = account("clip", encode_clip.with_options(cpu=cpu, memory=mem).remote(
+                job_id, name, p, p["out_name"]))
+            meta(state="done", usage=totals(), **res)
             return res
 
         meta(state="splitting")
-        sp = split.remote(name, p["chunk_sec"])
+        sp = account("split", split.remote(name, p["chunk_sec"]))
         work, parts = sp["work"], sp["parts"]
         meta(state="encoding", total_chunks=len(parts), split_reused=sp["reused"])
 
@@ -497,9 +562,14 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
             raise RuntimeError("有 {} 段失敗：{}".format(
                 len(failed), "；".join("第 {} 段 {!r}".format(i, r) for i, r in failed[:3])))
 
+        for i, r in enumerate(results):
+            account("chunk {}".format(i), r)
+        retries = sum((r.get("attempt") or 1) - 1 for r in results)
+
         meta(state="merging")
-        res = merge.remote(name, work, results, p["out_name"])
-        meta(state="done", **res)
+        res = account("merge", merge.remote(
+            name, work, [r["name"] for r in results], p["out_name"]))
+        meta(state="done", usage=dict(totals(), retries=retries), **res)
         return res
 
     except Exception as e:
