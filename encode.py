@@ -83,6 +83,26 @@ def _publish(src_tmp: str, dst: str) -> None:
     os.replace(part, dst)
 
 
+VMAF_FILTER = "settb=AVTB,setpts=N/FRAME_RATE/TB,format=yuv420p10le"
+
+
+def _vmaf(dist: str, ref: str, threads: int = 8) -> dict:
+    """對整支檔案打分，兩邊都不做 seek。
+
+    容器裡的 ffmpeg 本來就含 libvmaf（BtbN build 的 scripts.d 有 45-vmaf.sh），
+    所以不必把檔案抓回本機。用 setpts=N/FRAME_RATE/TB 以幀序號對齊 ——
+    各自 seek 去比對是「VMAF 只有 30 幾分」的典型原因。
+    """
+    log = "/tmp/vmaf.json"
+    _run(["ffmpeg", "-hide_banner", "-y", "-i", dist, "-i", ref, "-an", "-lavfi",
+          "[0:v]{f}[d];[1:v]{f}[r];[d][r]libvmaf=n_threads={t}:log_fmt=json:log_path={l}".format(
+              f=VMAF_FILTER, t=threads, l=log),
+          "-f", "null", "-"])
+    with open(log, encoding="utf-8") as f:
+        v = json.load(f)["pooled_metrics"]["vmaf"]
+    return {"vmaf_mean": v["mean"], "vmaf_harmonic": v["harmonic_mean"], "vmaf_min": v["min"]}
+
+
 def _put_chunk(job_id: str, idx: int, **kw) -> None:
     """每段只有自己會寫這個 key，不會有 read-modify-write 競態。"""
     jobs.put("job:{}:chunk:{}".format(job_id, idx),
@@ -306,6 +326,66 @@ def encode_clip(job_id: str, name: str, p: dict, out_name: str) -> dict:
 
 
 # --------------------------------------------------------------------------
+# 參數掃描
+# --------------------------------------------------------------------------
+
+@app.function(image=image, volumes={"/data": vol}, cpu=4, memory=4096,
+              timeout=HOUR, retries=2)
+def make_ref(name: str, start: str, dur: int) -> dict:
+    """從 Volume 上的原片切一段無損 ref，存回 in/。
+
+    有了它就不必在本機切好再上傳。無損（-qp 0）所以體積大，但只有 20 秒，
+    而且打分時它是基準，不能有任何壓縮損失。
+    """
+    stem = os.path.splitext(os.path.basename(name))[0].replace(" ", "_")
+    out = "ref_{}_{}s.mkv".format(stem, dur)
+    tmp = "/tmp/" + out
+
+    _run(["ffmpeg", "-hide_banner", "-y", "-ss", start, "-t", str(dur),
+          "-i", "/data/in/{}".format(name),
+          "-map", "0:v:0", "-an", "-sn",
+          "-c:v", "libx264", "-qp", "0", "-preset", "fast", "-pix_fmt", "yuv420p", tmp])
+
+    _publish(tmp, "/data/in/{}".format(out))
+    vol.commit()
+    size = os.path.getsize(tmp)
+    print("ref 完成：in/{} {:.1f} MiB".format(out, size / 2 ** 20))
+    return {"ref": "in/{}".format(out), "ref_name": out,
+            "size": size, "out_duration": _duration(tmp)}
+
+
+@app.function(image=image, volumes={"/data": vol}, cpu=8, memory=8192,
+              timeout=4 * HOUR, retries=2)
+def sweep_one(arg: dict) -> dict:
+    """用一個 crf 編整支 ref，然後當場打分。編碼與打分在同一個容器裡完成。"""
+    job_id, idx, crf, p, ref = arg["job_id"], arg["idx"], arg["crf"], arg["params"], arg["ref"]
+    vol.reload()
+
+    src = "/data/{}".format(ref)
+    total = _duration(src)
+    tmp = "/tmp/sweep_crf{}.mkv".format(crf)
+    q = dict(p, crf=crf)
+
+    def mark(**kw):
+        _put_chunk(job_id, idx, crf=crf, total=total, **kw)
+
+    # 編碼佔進度的前 70%，打分佔後 30%（打分大約要編碼的一半時間）
+    mark(state="encoding", pct=0.0, out_time=0.0, fps=0.0)
+    _encode_with_progress(
+        _encode_cmd(src, tmp, q), total,
+        lambda pct, secs, fps: mark(state="encoding", pct=pct * 0.7, out_time=secs, fps=fps))
+
+    mark(state="scoring", pct=70.0, out_time=total, fps=0.0)
+    v = _vmaf(tmp, src)
+    size = os.path.getsize(tmp)
+
+    mark(state="done", pct=100.0, out_time=total, fps=0.0, size=size, **v)
+    print("crf {} → {:.1f} MiB, VMAF 平均 {:.2f} / 最低 {:.2f}".format(
+        crf, size / 2 ** 20, v["vmaf_mean"], v["vmaf_min"]))
+    return dict(crf=crf, size=size, **v)
+
+
+# --------------------------------------------------------------------------
 # 協調者
 # --------------------------------------------------------------------------
 
@@ -318,16 +398,58 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
     整個 job 的進度就斷了。真正花錢的編碼工作留在便宜的可搶佔池裡。
     """
     key = "job:{}".format(job_id)
+    state = {}
 
     def meta(**kw):
-        cur = jobs.get(key) or {}
-        cur.update(kw)
-        cur["updated"] = time.time()
-        jobs.put(key, cur)
+        """driver 是這個 key 的唯一 writer，所以狀態留在本地、每次整份寫出去。
+
+        原本是 get → update → put，結果讀到舊值時會把前一次寫的欄位蓋掉
+        （實測掉過 kind 和 total_chunks）。不回頭讀就沒有這個問題。
+        """
+        state.update(kw)
+        state["updated"] = time.time()
+        jobs.put(key, dict(state))
 
     try:
         cpu = p.get("cpu") or 8
         mem = p.get("mem") or int(cpu) * 1024
+        mode = p.get("mode") or "full"
+
+        if mode == "ref":
+            meta(state="encoding", kind="ref", total_chunks=0)
+            res = make_ref.remote(name, p["start"], p["dur"])
+            meta(state="done", **res)
+            return res
+
+        if mode == "sweep":
+            crfs = sorted(set(int(c) for c in p["crfs"]))
+            meta(state="encoding", kind="sweep", total_chunks=len(crfs))
+
+            args = [{"job_id": job_id, "idx": i, "crf": c, "params": p, "ref": p["ref"]}
+                    for i, c in enumerate(crfs)]
+            rows = list(sweep_one.with_options(cpu=cpu, memory=mem).map(
+                args, return_exceptions=True))
+
+            bad = [(i, r) for i, r in enumerate(rows) if isinstance(r, Exception)]
+            if bad:
+                raise RuntimeError("有 {} 個 crf 失敗：{}".format(
+                    len(bad), "；".join("crf {} {!r}".format(crfs[i], r) for i, r in bad[:3])))
+
+            rows.sort(key=lambda r: r["crf"])
+            # 邊際取捨：固定門檻只告訴你過或不過，看不到附近的性價比
+            for i, r in enumerate(rows):
+                if i:
+                    r["d_vmaf"] = r["vmaf_mean"] - rows[i - 1]["vmaf_mean"]
+                    r["d_size"] = r["size"] - rows[i - 1]["size"]
+
+            ok = [r for r in rows
+                  if r["vmaf_mean"] >= p["min_mean"] and r["vmaf_min"] >= p["min_low"]]
+            pick = min(ok, key=lambda r: r["size"])["crf"] if ok else None
+
+            res = {"table": rows, "pick": pick, "ref": p["ref"],
+                   "min_mean": p["min_mean"], "min_low": p["min_low"]}
+            meta(state="done", **res)
+            return res
 
         if p.get("test"):
             meta(state="encoding", total_chunks=1)

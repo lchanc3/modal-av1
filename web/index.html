@@ -263,22 +263,58 @@
   </section>
 
   <section class="panel hide" id="panel-test">
-    <div class="card">
-      <div class="cap" style="margin-bottom:14px">參數掃描</div>
-      <p class="muted" style="margin:0 0 10px">
-        規劃中：給一支無損 ref 片段，在<strong>同一個容器</strong>裡把 crf 28/30/32/34/36 各編一次，
-        當場用 libvmaf 對 ref 打分，回傳 crf／體積／平均／調和／最低，
-        並附上每一級的 ΔVMAF 與 Δ體積，讓拐點看得出來。
-      </p>
-      <p class="muted" style="margin:0">
-        預設沿用 runbook 的標準（平均 ≥ 95、最低 ≥ 89，取體積最小者），
-        但只當成篩選 —— VMAF 對色帶與暗部不敏感，最後仍要自己看一眼。
-        選定後可一鍵存成模板。
-      </p>
-      <p class="muted" style="margin:14px 0 0">
-        目前請先用「轉檔」分頁的<strong>只轉測試片段</strong>，用不同 tag 各送一次，
-        再以 <code>python vmaf.py ref.mkv</code> 打分。
-      </p>
+    <div class="cols">
+      <aside>
+        <div class="card">
+          <div class="cap" style="margin-bottom:14px">① 產生無損 ref</div>
+          <p class="muted" style="margin:0 0 14px">
+            打分的基準。挑有暗部、膚色、快速動作的片段比較有代表性。
+          </p>
+          <div style="margin-bottom:12px">
+            <label for="refSrc">來源</label>
+            <select id="refSrc"></select>
+          </div>
+          <div class="grid2" style="margin-bottom:14px">
+            <div><label for="refStart">起點</label><input class="mono" id="refStart" value="00:05:00"></div>
+            <div><label for="refDur">長度（秒）</label><input class="mono" id="refDur" type="number" value="20"></div>
+          </div>
+          <button type="button" id="refGo" onclick="makeRef()">產生 ref</button>
+        </div>
+
+        <div class="card">
+          <div class="cap" style="margin-bottom:14px">② 掃描 crf</div>
+          <div style="margin-bottom:12px">
+            <label for="swRef">ref</label>
+            <select id="swRef"></select>
+          </div>
+          <div style="margin-bottom:12px">
+            <label for="swCrfs">crf 階梯（逗號分隔）</label>
+            <input class="mono" id="swCrfs" value="28,30,32,34,36">
+          </div>
+          <div class="grid2" style="margin-bottom:12px">
+            <div><label for="swPreset">preset</label><input class="mono" id="swPreset" type="number" value="3"></div>
+            <div><label for="swCpu">每個 crf 核心</label><input class="mono" id="swCpu" type="number" value="8"></div>
+            <div><label for="swMean">門檻・平均</label><input class="mono" id="swMean" type="number" step="0.5" value="95"></div>
+            <div><label for="swLow">門檻・最低</label><input class="mono" id="swLow" type="number" step="0.5" value="89"></div>
+          </div>
+          <div style="margin-bottom:14px">
+            <label for="swSvt">svtav1-params</label>
+            <input class="mono" id="swSvt" style="font-size:12px" value="tune=0:enable-overlays=1:enable-qm=1:film-grain=0">
+          </div>
+          <div class="spread">
+            <span class="muted" id="swEstimate"></span>
+            <button type="button" class="primary" id="swGo" onclick="startSweep()">開始掃描</button>
+          </div>
+        </div>
+      </aside>
+
+      <main>
+        <div id="activeTest"></div>
+        <div class="card" id="sweepResult">
+          <div class="cap" style="margin-bottom:12px">掃描結果</div>
+          <p class="muted" style="margin:0">還沒有掃描結果。</p>
+        </div>
+      </main>
     </div>
   </section>
 
@@ -417,6 +453,50 @@ async function submitJob() {
   $("go").disabled = false;
 }
 
+// ---- 測試：產生 ref 與掃描 crf ---------------------------------------------
+async function post(body) {
+  const r = await fetch("/api/jobs", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!r.ok) throw new Error(await r.text());
+  await loadJobs();
+}
+
+async function makeRef() {
+  if (!$("refSrc").value) return alert("先選一個來源檔");
+  $("refGo").disabled = true;
+  try {
+    await post({mode: "ref", name: $("refSrc").value,
+                start: $("refStart").value, dur: +$("refDur").value});
+  } catch (e) { alert("失敗：" + e.message); }
+  $("refGo").disabled = false;
+}
+
+async function startSweep() {
+  const ref = $("swRef").value;
+  if (!ref) return alert("先產生一支 ref");
+  const crfs = $("swCrfs").value.split(",").map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
+  if (!crfs.length) return alert("crf 階梯格式不對");
+  $("swGo").disabled = true;
+  try {
+    await post({mode: "sweep", name: ref.replace(/^in\//, ""), ref: ref, crfs: crfs,
+                preset: +$("swPreset").value, cpu: +$("swCpu").value, svt: $("swSvt").value,
+                min_mean: +$("swMean").value, min_low: +$("swLow").value});
+  } catch (e) { alert("失敗：" + e.message); }
+  $("swGo").disabled = false;
+}
+
+function sweepEstimate() {
+  const crfs = $("swCrfs").value.split(",").filter(s => s.trim()).length;
+  const cpu = +$("swCpu").value, dur = +$("refDur").value || 20;
+  const speed = 0.5 * (cpu / 16) * 1.35;
+  // 打分大約是編碼時間的一半，所以乘 1.5
+  const hrs = crfs * (dur / speed) * 1.5 / 3600;
+  const cost = hrs * (cpu * 0.0000131 + cpu * 0.00000222) * 3600;
+  $("swEstimate").innerHTML = `${crfs} 個 crf 平行　·　<span class="mono">≈ $${cost.toFixed(3)}</span>`;
+}
+["swCrfs", "swCpu", "refDur"].forEach(id => $(id).addEventListener("input", sweepEstimate));
+sweepEstimate();
+
 // ---- 工作 ----------------------------------------------------------------
 const STATE = {
   queued:    ["排隊中", "idle"], splitting: ["切段中", "run"],
@@ -432,9 +512,11 @@ function chunkCells(j) {
     const done = c.state === "done";
     const redo = c.state === "encoding" && c.pct < 8 && (j.pct || 0) > 25;
     const col = done ? "var(--ok)" : redo ? "var(--err)" : "var(--accent)";
-    const txt = done ? "100%" : c.state === "waiting" ? "—" : (c.pct || 0).toFixed(0) + "%";
+    const txt = done ? "100%" : c.state === "waiting" ? "—"
+              : c.state === "scoring" ? "打分" : (c.pct || 0).toFixed(0) + "%";
+    const lbl = c.crf != null ? "crf " + c.crf : "#" + String(c.idx).padStart(2, "0");
     return `<div class="chunk">
-      <div class="lbl"><span>#${String(c.idx).padStart(2,"0")}</span><span style="color:${col}">${txt}</span></div>
+      <div class="lbl"><span>${lbl}</span><span style="color:${col}">${txt}</span></div>
       <div class="bar"><i style="width:${c.pct||0}%;background:${col}"></i></div>
     </div>`;
   }).join("");
@@ -446,13 +528,16 @@ function chunkCells(j) {
   return `<div class="chunks">${cells}</div>${note}`;
 }
 
+const KIND_TITLE = {sweep: "參數掃描", ref: "產生 ref"};
+
 function activeCard(j) {
   const [text, cls] = STATE[j.state] || [j.state, "idle"];
+  const title = KIND_TITLE[j.kind] || j.name;
   return `<div class="card active">
     <div class="spread" style="align-items:flex-start">
       <div>
         <div class="row">
-          <span style="font-family:var(--serif);font-size:20px;font-weight:600">${esc(j.name)}</span>
+          <span style="font-family:var(--serif);font-size:20px;font-weight:600">${esc(title)}</span>
           <span class="pill ${cls}">${text}</span>
           ${j.stale ? '<span class="pill err">driver 已消失</span>' : ""}
         </div>
@@ -486,12 +571,78 @@ function paint(el, html) {   // 內容沒變就不動 DOM，避免每 2 秒重�
   if (html !== el._last) { el.innerHTML = html; el._last = html; }
 }
 
+// 重建下拉時保住使用者的選擇，否則每次輪詢都會把選項跳回第一個
+function fillSelect(sel, items, value, empty) {
+  const keep = sel.value;
+  const opts = items.map(x => `<option value="${esc(value(x))}">${esc(x.name)}</option>`).join("")
+               || `<option value="">${empty}</option>`;
+  if (opts !== sel._last) { sel.innerHTML = opts; sel._last = opts; }
+  if (items.some(x => value(x) === keep)) sel.value = keep;
+}
+
+const TEST_KINDS = ["sweep", "ref"];
+
+// 同一支 ref 的多次掃描合併成一張表：延伸階梯（先跑 28~36 再補 38/40）
+// 是很自然的操作，不該讓後一次把前一次蓋掉。同一個 crf 以最新的為準。
+function mergeSweeps(jobs, ref) {
+  const byCrf = new Map();
+  jobs.filter(j => j.ref === ref).reverse()      // 舊 → 新，後面的覆蓋前面的
+      .forEach(j => (j.table || []).forEach(r => byCrf.set(r.crf, {...r})));
+  const rows = [...byCrf.values()].sort((a, b) => a.crf - b.crf);
+  rows.forEach((r, i) => {
+    r.d_vmaf = i ? r.vmaf_mean - rows[i - 1].vmaf_mean : null;
+    r.d_size = i ? r.size - rows[i - 1].size : null;
+  });
+  return rows;
+}
+
+function sweepTable(j) {
+  const rows = (j.table || []).map(r => {
+    const pass = r.vmaf_mean >= j.min_mean && r.vmaf_min >= j.min_low;
+    const best = r.crf === j.pick;
+    return `<tr style="${best ? "background:#F3EDE4" : ""}">
+      <td class="mono" style="${best ? "font-weight:700;color:var(--accent)" : ""}">crf ${r.crf}${best ? "　← 建議" : ""}</td>
+      <td class="num">${mib(r.size)}</td>
+      <td class="num" style="color:${pass ? "var(--ok)" : "var(--err)"}">${r.vmaf_mean.toFixed(2)}</td>
+      <td class="num">${r.vmaf_harmonic.toFixed(2)}</td>
+      <td class="num" style="color:${r.vmaf_min >= j.min_low ? "var(--ok)" : "var(--err)"}">${r.vmaf_min.toFixed(2)}</td>
+      <td class="num">${r.d_vmaf == null ? "—" : r.d_vmaf.toFixed(2)}</td>
+      <td class="num">${r.d_size == null ? "—" : (r.d_size / 1048576).toFixed(2) + " MiB"}</td>
+    </tr>`;
+  }).join("");
+  return `<div class="cap" style="margin-bottom:12px">掃描結果</div>
+    <div class="muted mono" style="margin-bottom:10px">${esc(j.ref || "")}　·　門檻 平均 ≥ ${j.min_mean} / 最低 ≥ ${j.min_low}</div>
+    <table><thead><tr>
+      <td class="muted">參數</td><td class="num muted">體積</td><td class="num muted">平均</td>
+      <td class="num muted">調和</td><td class="num muted">最低</td>
+      <td class="num muted">ΔVMAF</td><td class="num muted">Δ體積</td>
+    </tr></thead><tbody>${rows}</tbody></table>
+    ${j.pick == null
+      ? '<p class="warn" style="margin:12px 0 0">沒有任何 crf 同時滿足兩個門檻 —— 把階梯往下延伸（更低的 crf），或放寬門檻。</p>'
+      : `<p class="muted" style="margin:12px 0 0">建議 crf ${j.pick}：過門檻之中體積最小的。
+         ΔVMAF／Δ體積 是與上一級的差，拐點在哪看這兩欄。
+         <strong>VMAF 對色帶與暗部不敏感，最後仍要用播放器看一眼。</strong></p>`}`;
+}
+
 async function loadJobs() {
   const list = await fetch("/api/jobs").then(r => r.json());
   const running = list.filter(j => !TERMINAL.includes(j.state));
   const past = list.filter(j => TERMINAL.includes(j.state));
 
-  paint($("active"), running.map(activeCard).join(""));
+  paint($("active"), running.filter(j => !TEST_KINDS.includes(j.kind)).map(activeCard).join(""));
+  paint($("activeTest"), running.filter(j => TEST_KINDS.includes(j.kind)).map(activeCard).join(""));
+
+  const sweeps = past.filter(j => j.kind === "sweep" && j.state === "done" && (j.table || []).length);
+  if (sweeps.length) {
+    const latest = sweeps[0];
+    const merged = mergeSweeps(sweeps, latest.ref);
+    const ok = merged.filter(r => r.vmaf_mean >= latest.min_mean && r.vmaf_min >= latest.min_low);
+    const pick = ok.length ? ok.reduce((a, b) => a.size <= b.size ? a : b).crf : null;
+    paint($("sweepResult"), sweepTable({...latest, table: merged, pick}));
+  } else {
+    paint($("sweepResult"),
+      '<div class="cap" style="margin-bottom:12px">掃描結果</div><p class="muted" style="margin:0">還沒有掃描結果。</p>');
+  }
   $("histLabel").textContent = past.length ? `歷史（${past.length} 筆已結束）` : "歷史";
   $("hist").classList.toggle("hide", past.length === 0);
   if ($("hist").open) paint($("histBody"), past.map(histRow).join(""));
@@ -511,11 +662,10 @@ $("hist").addEventListener("toggle", () => { $("histBody")._last = null; loadJob
 async function loadFiles() {
   const f = await fetch("/api/files").then(r => r.json());
 
-  const sel = $("name"), keep = sel.value;
-  const opts = f.in.map(x => `<option>${esc(x.name)}</option>`).join("")
-               || '<option value="">（先上傳原片）</option>';
-  if (opts !== sel._last) { sel.innerHTML = opts; sel._last = opts; }
-  if (f.in.some(x => x.name === keep)) sel.value = keep;
+  const isRef = x => x.name.startsWith("ref_");
+  fillSelect($("name"), f.in, x => x.name, "（先上傳原片）");
+  fillSelect($("refSrc"), f.in.filter(x => !isRef(x)), x => x.name, "（先上傳原片）");
+  fillSelect($("swRef"), f.in.filter(isRef), x => x.path, "（先產生 ref）");
 
   $("outTotal").textContent = f.out.length ? mib(f.out.reduce((s, x) => s + x.size, 0)) : "";
   // 路徑放 data-path 而不是塞進 onclick 的字串裡：檔名含單引號會把字串撐破

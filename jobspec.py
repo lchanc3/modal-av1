@@ -22,6 +22,7 @@ DICT = "av1-jobs"
 BASE_SVT = "tune=0:enable-overlays=1:enable-qm=1:film-grain=0"
 
 DEFAULTS = {
+    "mode": "full",     # full｜ref｜sweep
     "preset": 3,
     "crf": 34,
     "gop": 600,
@@ -32,6 +33,11 @@ DEFAULTS = {
     "start": "00:05:00",
     "dur": 20,
     "tag": "",
+    # 參數掃描
+    "crfs": [28, 30, 32, 34, 36],
+    "ref": "",
+    "min_mean": 95.0,   # runbook 實測出來的標準
+    "min_low": 89.0,
 }
 
 TERMINAL = ("done", "error", "cancelled")
@@ -56,6 +62,21 @@ def build(name: str, **over) -> dict:
     p["mem"] = p["cpu"] * 1024
 
     stem = os.path.splitext(name)[0]
+
+    if p["mode"] == "ref":
+        p["out_name"] = "ref_{}_{}s.mkv".format(
+            os.path.basename(stem).replace(" ", "_"), p["dur"])
+        return p
+
+    if p["mode"] == "sweep":
+        p["crfs"] = sorted({int(c) for c in p["crfs"]})
+        p["min_mean"] = float(p["min_mean"])
+        p["min_low"] = float(p["min_low"])
+        if not p["ref"]:
+            raise ValueError("掃描需要指定 ref")
+        p["out_name"] = "掃描 crf {}".format("/".join(str(c) for c in p["crfs"]))
+        return p
+
     if p["test"]:
         tag = p["tag"] or "p{}_crf{}".format(p["preset"], p["crf"])
         p["out_name"] = "{}_test_{}.mkv".format(stem, tag)
@@ -156,9 +177,15 @@ def read_job(d, job_id: str, snap=None) -> dict:
         "created": sub.get("created", 0),
         "call_id": sub.get("driver_call_id", ""),
         "state": state,
+        "kind": meta.get("kind") or (sub.get("params", {}).get("mode") or "full"),
         "pct": round(pct, 1),
         "total_chunks": total,
         "chunks": chunks,
+        "table": meta.get("table") or [],
+        "pick": meta.get("pick"),
+        "ref": meta.get("ref") or sub.get("params", {}).get("ref", ""),
+        "min_mean": meta.get("min_mean"),
+        "min_low": meta.get("min_low"),
         "out": meta.get("out", ""),
         "size": meta.get("size", 0),
         "src_duration": meta.get("src_duration", 0),
