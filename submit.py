@@ -12,7 +12,7 @@ p.add_argument("--gop", type=int)
 p.add_argument("--svt")
 p.add_argument("--tag", default=None)
 p.add_argument("--chunk", type=int, dest="chunk_sec",
-               help="每段秒數（預設 600）。調大＝交界少，調小＝被搶佔時賠得少")
+               help="每段秒數（預設 240）。調大＝交界少，調小＝被搶佔時賠得少")
 p.add_argument("--cpu", type=int, help="每段的核心數（預設 8）")
 p.add_argument("--test", action="store_true", default=None,
                help="只轉一小段測試（真的只轉，不是只改檔名）")
