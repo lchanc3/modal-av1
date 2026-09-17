@@ -112,6 +112,15 @@
             opacity: .75; }
   .days i.big { opacity: 1; }
 
+  button.arm { color: var(--err); border-color: var(--err); font-weight: 500; }
+
+  #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+           background: var(--fg); color: var(--bg); padding: 11px 20px; border-radius: 8px;
+           font-size: 13.5px; box-shadow: 0 4px 16px rgba(0,0,0,.18); z-index: 99;
+           max-width: 620px; opacity: 0; pointer-events: none; transition: opacity .2s; }
+  #toast.show { opacity: 1; }
+  #toast.bad { background: var(--err); color: #fff; }
+
   .mono { font-family: var(--mono); }
   .muted { color: var(--dim); font-size: 12px; }
   .warn { color: #8A6A1F; font-size: 12px; }
@@ -137,6 +146,7 @@
 </style>
 </head>
 <body>
+<div id="toast"></div>
 <div class="wrap">
 
   <header>
@@ -144,7 +154,7 @@
       <h1>modal&#8209;av1</h1>
       <p>切段並行轉檔　·　送出後可關掉本頁</p>
     </div>
-    <button type="button" onclick="stopApp()">強制停止整個 App</button>
+    <button type="button" onclick="armConfirm(this, stopApp)">強制停止整個 App</button>
   </header>
 
   <div class="card" id="budgetCard">
@@ -258,7 +268,7 @@
         </div>
         <div class="spread">
           <p class="muted" style="margin:0" id="workNote"></p>
-          <button type="button" onclick="gcWork()">清理</button>
+          <button type="button" onclick="armConfirm(this, gcWork)">清理</button>
         </div>
       </div>
 
@@ -408,6 +418,52 @@ const hhmmss = s => { s = Math.max(0, Math.round(s));
   return [Math.floor(s/3600), Math.floor(s/60)%60, s%60].map(n => String(n).padStart(2,"0")).join(":"); };
 const TERMINAL = ["done", "error", "cancelled"];
 
+// ---- 提示與確認 ------------------------------------------------------------
+// 完全不用 confirm() / alert()：瀏覽器可以永久封鎖一個網域的對話框，
+// 一旦被封鎖，按下去就真的什麼都不會發生，而且沒有任何線索。
+
+let toastTimer = null;
+function toast(msg, bad = false) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.toggle("bad", bad);
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), bad ? 6000 : 3000);
+}
+
+// 兩段式確認：第一次點變成「確定？」，四秒內再點一次才真的執行
+function armConfirm(btn, action) {
+  if (btn._armed) {
+    clearTimeout(btn._armed);
+    btn._armed = null;
+    btn.innerHTML = btn._html;
+    btn.classList.remove("arm");
+    action();
+    return;
+  }
+  btn._html = btn.innerHTML;
+  btn.innerHTML = "確定？";
+  btn.classList.add("arm");
+  btn._armed = setTimeout(() => {
+    btn._armed = null;
+    btn.innerHTML = btn._html;
+    btn.classList.remove("arm");
+  }, 4000);
+}
+
+async function send(url, opts, okMsg) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) { toast((await r.text()).slice(0, 200), true); return null; }
+    if (okMsg) toast(okMsg);
+    return r.status === 204 ? {} : await r.json().catch(() => ({}));
+  } catch (e) {
+    toast("連線失敗：" + e.message + "（server 還在跑嗎？）", true);
+    return null;
+  }
+}
+
 const ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></svg>';
 const ICON_RETRY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
 
@@ -426,8 +482,8 @@ function doUpload(file) {
   const uid = Math.random().toString(16).slice(2, 10);
   const xhr = new XMLHttpRequest();
   xhr.open("PUT", `/api/upload?name=${encodeURIComponent(file.name)}&uid=${uid}`);
-  xhr.onload = () => { if (xhr.status !== 200) alert("上傳失敗：" + xhr.responseText); loadFiles(); };
-  xhr.onerror = () => alert("上傳失敗（連線中斷）");
+  xhr.onload = () => { if (xhr.status !== 200) toast("上傳失敗：" + xhr.responseText, true); loadFiles(); };
+  xhr.onerror = () => toast("上傳失敗（連線中斷）", true);
   xhr.send(file);
   loadUploads();     // 進度由 server 回報，不靠這個分頁的 XHR 事件
 }
@@ -443,16 +499,12 @@ const UP_PHASE = {
 
 async function uploadLocal() {
   const path = $("localPath").value.trim();
-  if (!path) return alert("填一個本機檔案路徑");
+  if (!path) return toast("填一個本機檔案路徑", true);
   $("localGo").disabled = true;
-  try {
-    const r = await fetch("/api/upload/local", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({path})});
-    if (!r.ok) throw new Error(await r.text());
-    $("localPath").value = "";
-    loadUploads();
-  } catch (e) { alert("失敗：" + e.message); }
+  const r = await send("/api/upload/local", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({path})});
+  if (r) { $("localPath").value = ""; loadUploads(); }
   $("localGo").disabled = false;
 }
 
@@ -509,14 +561,11 @@ async function submitJob() {
     test: $("test").checked, start: $("start").value, dur: +$("dur").value,
     tag: $("tag").value || "",
   };
-  if (!body.name) return alert("先選一個來源檔");
+  if (!body.name) return toast("先選一個來源檔", true);
   $("go").disabled = true;
-  try {
-    const r = await fetch("/api/jobs", {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-    if (!r.ok) throw new Error(await r.text());
-    await loadJobs();
-  } catch (e) { alert("送出失敗：" + e.message); }
+  if (await send("/api/jobs", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)}, "已送出")) await loadJobs();
   $("go").disabled = false;
 }
 
@@ -548,10 +597,10 @@ function fillTpl(t, {editing = false} = {}) {
 async function saveTpl() {
   const body = {id: $("tplId").value || undefined};
   for (const [id, key] of Object.entries(TPL_FIELDS)) body[key] = $(id).value;
-  if (!body.name.trim()) return alert("模板需要名稱");
-  const r = await fetch("/api/templates", {
-    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-  if (!r.ok) return alert("儲存失敗：" + await r.text());
+  if (!body.name.trim()) return toast("模板需要名稱", true);
+  if (!await send("/api/templates", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)}, "模板已儲存")) return;
   resetTpl();
   loadTemplates();
 }
@@ -589,7 +638,7 @@ document.addEventListener("click", e => {
   if (!t) return;
   if (b.classList.contains("tpl-apply")) applyTpl(t);
   else if (b.classList.contains("tpl-edit")) fillTpl(t, {editing: true});
-  else if (b.classList.contains("tpl-del")) delTpl(t);
+  else if (b.classList.contains("tpl-del")) armConfirm(b, () => delTpl(t));
 });
 
 function applyTpl(t) {
@@ -602,9 +651,8 @@ function applyTpl(t) {
 }
 
 async function delTpl(t) {
-  if (!confirm(`刪除模板「${t.name}」？`)) return;
-  await fetch("/api/templates/" + t.id, {method: "DELETE"});
-  loadTemplates();
+  if (await send("/api/templates/" + t.id, {method: "DELETE"}, `已刪除模板「${t.name}」`))
+    loadTemplates();
 }
 
 function exportTpl() {
@@ -628,40 +676,37 @@ $("tplFile").onchange = async e => {
       body: JSON.stringify({templates: data.templates || data, mode: "merge"})});
     if (!r.ok) throw new Error(await r.text());
     const s = await r.json();
-    alert(`匯入完成：新增 ${s.added}、更新 ${s.updated}、跳過 ${s.skipped}，共 ${s.total} 個`);
+    toast(`匯入完成：新增 ${s.added}、更新 ${s.updated}、跳過 ${s.skipped}，共 ${s.total} 個`);
     loadTemplates();
-  } catch (err) { alert("匯入失敗：" + err.message); }
+  } catch (err) { toast("匯入失敗：" + err.message, true); }
 };
 
 // ---- 測試：產生 ref 與掃描 crf ---------------------------------------------
-async function post(body) {
-  const r = await fetch("/api/jobs", {
-    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-  if (!r.ok) throw new Error(await r.text());
-  await loadJobs();
+async function post(body, okMsg) {
+  const r = await send("/api/jobs", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)}, okMsg);
+  if (r) await loadJobs();
+  return r;
 }
 
 async function makeRef() {
-  if (!$("refSrc").value) return alert("先選一個來源檔");
+  if (!$("refSrc").value) return toast("先選一個來源檔", true);
   $("refGo").disabled = true;
-  try {
-    await post({mode: "ref", name: $("refSrc").value,
-                start: $("refStart").value, dur: +$("refDur").value});
-  } catch (e) { alert("失敗：" + e.message); }
+  await post({mode: "ref", name: $("refSrc").value,
+              start: $("refStart").value, dur: +$("refDur").value}, "已送出，正在產生 ref");
   $("refGo").disabled = false;
 }
 
 async function startSweep() {
   const ref = $("swRef").value;
-  if (!ref) return alert("先產生一支 ref");
+  if (!ref) return toast("先產生一支 ref", true);
   const crfs = $("swCrfs").value.split(",").map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
-  if (!crfs.length) return alert("crf 階梯格式不對");
+  if (!crfs.length) return toast("crf 階梯格式不對", true);
   $("swGo").disabled = true;
-  try {
-    await post({mode: "sweep", name: ref.replace(/^in\//, ""), ref: ref, crfs: crfs,
-                preset: +$("swPreset").value, cpu: +$("swCpu").value, svt: $("swSvt").value,
-                min_mean: +$("swMean").value, min_low: +$("swLow").value});
-  } catch (e) { alert("失敗：" + e.message); }
+  await post({mode: "sweep", name: ref.replace(/^in\//, ""), ref: ref, crfs: crfs,
+              preset: +$("swPreset").value, cpu: +$("swCpu").value, svt: $("swSvt").value,
+              min_mean: +$("swMean").value, min_low: +$("swLow").value}, "已開始掃描");
   $("swGo").disabled = false;
 }
 
@@ -737,7 +782,7 @@ function activeCard(j) {
       </div>
       <div class="row">
         <span class="mono" style="font-size:30px;font-weight:500;color:var(--accent);line-height:1">${j.pct.toFixed(1)}%</span>
-        <button type="button" onclick="cancelJob('${j.job_id}')">取消</button>
+        <button type="button" onclick="armConfirm(this, () => cancelJob('${j.job_id}'))">取消</button>
       </div>
     </div>
     <div class="bar" style="margin-top:18px"><i style="width:${j.pct}%"></i></div>
@@ -844,8 +889,8 @@ async function loadJobs() {
 }
 
 async function cancelJob(id) {
-  if (!confirm("確定取消這個工作？已編碼的段落會留在 Volume 上。")) return;
-  await fetch(`/api/jobs/${id}/cancel`, {method: "POST"}); loadJobs();
+  if (await send(`/api/jobs/${id}/cancel`, {method: "POST"}, "已取消，已編好的段落會留著供重送沿用"))
+    loadJobs();
 }
 async function forgetJob(id) {
   await fetch("/api/jobs/" + id, {method: "DELETE"});
@@ -939,27 +984,22 @@ async function loadWork() {
 }
 
 async function gcWork() {
-  if (!confirm("清掉所有暫存切段？重送時就得從頭重編。")) return;
-  const r = await fetch("/api/work/gc", {method: "POST"});
-  if (!r.ok) return alert("清理失敗：" + (await r.text()));
-  loadWork();
+  if (await send("/api/work/gc", {method: "POST"}, "暫存已清除")) loadWork();
 }
 
 document.addEventListener("click", e => {
   const btn = e.target.closest("button.rm");
-  if (btn) rmFile(btn.dataset.path);
+  if (btn) armConfirm(btn, () => rmFile(btn.dataset.path));
 });
 
 async function rmFile(path) {
-  if (!confirm("刪除 " + path + "？無法復原。")) return;
-  await fetch("/api/files?path=" + encodeURIComponent(path), {method: "DELETE"});
-  loadFiles();
+  if (await send("/api/files?path=" + encodeURIComponent(path), {method: "DELETE"},
+                 "已刪除 " + path)) loadFiles();
 }
 
 async function stopApp() {
-  if (!confirm("這會停掉整個 av1-encode App，所有執行中的容器都會被終止。確定？")) return;
-  const r = await fetch("/api/stop-app", {method: "POST"}).then(r => r.json());
-  alert(r.ok ? "已停止" : "失敗：" + r.out);
+  const r = await send("/api/stop-app", {method: "POST"});
+  if (r) toast(r.ok ? "已停止整個 App" : "失敗：" + r.out, !r.ok);
   loadJobs();
 }
 

@@ -103,7 +103,13 @@ def files():
 def remove_file(path: str):
     if not path.startswith(("in/", "out/")):
         raise HTTPException(400, "只能刪 in/ 或 out/ 底下的檔案")
-    vol().remove_file(path)
+    try:
+        vol().remove_file(path)
+    except FileNotFoundError:
+        raise HTTPException(404, "找不到 {}".format(path))
+    except Exception as e:
+        # 別讓它變成內容空洞的 500 —— 前端只能把訊息原樣顯示給人看
+        raise HTTPException(502, "刪除失敗：{}".format(e))
     return {"ok": True}
 
 
