@@ -340,18 +340,31 @@ def make_ref(name: str, start: str, dur: int) -> dict:
     stem = os.path.splitext(os.path.basename(name))[0].replace(" ", "_")
     out = "ref_{}_{}s.mkv".format(stem, dur)
     tmp = "/tmp/" + out
+    dst = "/data/in/{}".format(out)
+    vol.reload()
+
+    # 檔名由來源與長度決定，所以同樣的組合可以直接沿用，不必重切
+    if os.path.exists(dst):
+        try:
+            d = _duration(dst)
+            if abs(d - dur) < 1.0:
+                print("沿用既有 ref：in/{}".format(out))
+                return {"ref": "in/{}".format(out), "ref_name": out,
+                        "size": os.path.getsize(dst), "out_duration": d, "reused": True}
+        except Exception as e:
+            print("既有 ref 檢查失敗，重切：", repr(e))
 
     _run(["ffmpeg", "-hide_banner", "-y", "-ss", start, "-t", str(dur),
           "-i", "/data/in/{}".format(name),
           "-map", "0:v:0", "-an", "-sn",
           "-c:v", "libx264", "-qp", "0", "-preset", "fast", "-pix_fmt", "yuv420p", tmp])
 
-    _publish(tmp, "/data/in/{}".format(out))
+    _publish(tmp, dst)
     vol.commit()
     size = os.path.getsize(tmp)
     print("ref 完成：in/{} {:.1f} MiB".format(out, size / 2 ** 20))
     return {"ref": "in/{}".format(out), "ref_name": out,
-            "size": size, "out_duration": _duration(tmp)}
+            "size": size, "out_duration": _duration(tmp), "reused": False}
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=8, memory=8192,
@@ -423,9 +436,19 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
 
         if mode == "sweep":
             crfs = sorted(set(int(c) for c in p["crfs"]))
-            meta(state="encoding", kind="sweep", total_chunks=len(crfs))
 
-            args = [{"job_id": job_id, "idx": i, "crf": c, "params": p, "ref": p["ref"]}
+            # 沒給 ref 就從來源切一支（同樣的來源與長度會沿用既有的）。
+            # 掃描與產生 ref 合成一個 job，按一次就能走完，不必回來按第二次。
+            ref = p.get("ref")
+            if not ref:
+                meta(state="splitting", kind="sweep", total_chunks=len(crfs))
+                r = make_ref.remote(name, p["start"], p["dur"])
+                ref = r["ref"]
+                meta(ref=ref, ref_reused=r.get("reused", False))
+
+            meta(state="encoding", kind="sweep", total_chunks=len(crfs), ref=ref)
+
+            args = [{"job_id": job_id, "idx": i, "crf": c, "params": p, "ref": ref}
                     for i, c in enumerate(crfs)]
             rows = list(sweep_one.with_options(cpu=cpu, memory=mem).map(
                 args, return_exceptions=True))
@@ -446,7 +469,7 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
                   if r["vmaf_mean"] >= p["min_mean"] and r["vmaf_min"] >= p["min_low"]]
             pick = min(ok, key=lambda r: r["size"])["crf"] if ok else None
 
-            res = {"table": rows, "pick": pick, "ref": p["ref"],
+            res = {"table": rows, "pick": pick, "ref": ref,
                    "min_mean": p["min_mean"], "min_low": p["min_low"]}
             meta(state="done", **res)
             return res

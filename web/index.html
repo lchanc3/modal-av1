@@ -298,26 +298,19 @@
     <div class="cols">
       <aside>
         <div class="card">
-          <div class="cap" style="margin-bottom:14px">① 產生無損 ref</div>
+          <div class="cap" style="margin-bottom:14px">驗這支片</div>
           <p class="muted" style="margin:0 0 14px">
-            打分的基準。挑有暗部、膚色、快速動作的片段比較有代表性。
+            切一段無損 ref 當基準，再用多個 crf 各編一次並當場打分 ——
+            一個工作走完，不用回來按第二次。同樣的來源與長度會沿用已切好的 ref；
+            來源本身就是 ref 的話直接拿來用。挑有暗部、膚色、快速動作的片段比較有代表性。
           </p>
           <div style="margin-bottom:12px">
             <label for="refSrc">來源</label>
             <select id="refSrc"></select>
           </div>
-          <div class="grid2" style="margin-bottom:14px">
-            <div><label for="refStart">起點</label><input class="mono" id="refStart" value="00:05:00"></div>
-            <div><label for="refDur">長度（秒）</label><input class="mono" id="refDur" type="number" value="20"></div>
-          </div>
-          <button type="button" id="refGo" onclick="makeRef()">產生 ref</button>
-        </div>
-
-        <div class="card">
-          <div class="cap" style="margin-bottom:14px">② 掃描 crf</div>
-          <div style="margin-bottom:12px">
-            <label for="swRef">ref</label>
-            <select id="swRef"></select>
+          <div class="grid2" style="margin-bottom:12px">
+            <div><label for="refStart">ref 起點</label><input class="mono" id="refStart" value="00:05:00"></div>
+            <div><label for="refDur">ref 長度（秒）</label><input class="mono" id="refDur" type="number" value="20"></div>
           </div>
           <div style="margin-bottom:12px">
             <label for="swCrfs">crf 階梯（逗號分隔）</label>
@@ -335,7 +328,7 @@
           </div>
           <div class="spread">
             <span class="muted" id="swEstimate"></span>
-            <button type="button" class="primary" id="swGo" onclick="startSweep()">開始掃描</button>
+            <button type="button" class="primary" id="swGo" onclick="startSweep()">開始驗證</button>
           </div>
         </div>
       </aside>
@@ -704,23 +697,20 @@ async function post(body, okMsg) {
   return r;
 }
 
-async function makeRef() {
-  if (!$("refSrc").value) return toast("先選一個來源檔", true);
-  $("refGo").disabled = true;
-  await post({mode: "ref", name: $("refSrc").value,
-              start: $("refStart").value, dur: +$("refDur").value}, "已送出，正在產生 ref");
-  $("refGo").disabled = false;
-}
-
 async function startSweep() {
-  const ref = $("swRef").value;
-  if (!ref) return toast("先產生一支 ref", true);
+  const name = $("refSrc").value;
+  if (!name) return toast("先選一個來源檔", true);
   const crfs = $("swCrfs").value.split(",").map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
   if (!crfs.length) return toast("crf 階梯格式不對", true);
+
+  // 來源本身就是 ref 就直接用；否則留空讓雲端從來源切一支
+  const isRef = name.startsWith("ref_");
   $("swGo").disabled = true;
-  await post({mode: "sweep", name: ref.replace(/^in\//, ""), ref: ref, crfs: crfs,
+  await post({mode: "sweep", name: name, ref: isRef ? "in/" + name : "",
+              start: $("refStart").value, dur: +$("refDur").value, crfs: crfs,
               preset: +$("swPreset").value, cpu: +$("swCpu").value, svt: $("swSvt").value,
-              min_mean: +$("swMean").value, min_low: +$("swLow").value}, "已開始掃描");
+              min_mean: +$("swMean").value, min_low: +$("swLow").value},
+             isRef ? "已開始掃描" : "已送出，會先切 ref 再掃描");
   $("swGo").disabled = false;
 }
 
@@ -916,10 +906,9 @@ $("hist").addEventListener("toggle", () => { $("histBody")._last = null; loadJob
 async function loadFiles() {
   const f = await fetch("/api/files").then(r => r.json());
 
-  const isRef = x => x.name.startsWith("ref_");
   fillSelect($("name"), f.in, x => x.name, "（先上傳原片）");
-  fillSelect($("refSrc"), f.in.filter(x => !isRef(x)), x => x.name, "（先上傳原片）");
-  fillSelect($("swRef"), f.in.filter(isRef), x => x.path, "（先產生 ref）");
+  // ref 也列進來：想直接拿現成的 ref 掃描就選它，不會再重切
+  fillSelect($("refSrc"), f.in, x => x.name, "（先上傳原片）");
 
   $("outTotal").textContent = f.out.length ? mib(f.out.reduce((s, x) => s + x.size, 0)) : "";
   // 路徑放 data-path 而不是塞進 onclick 的字串裡：檔名含單引號會把字串撐破

@@ -72,8 +72,7 @@ def build(name: str, **over) -> dict:
         p["crfs"] = sorted({int(c) for c in p["crfs"]})
         p["min_mean"] = float(p["min_mean"])
         p["min_low"] = float(p["min_low"])
-        if not p["ref"]:
-            raise ValueError("掃描需要指定 ref")
+        # ref 留空代表「從 name 這支來源自己切一支」，由 driver 處理
         p["out_name"] = "掃描 crf {}".format("/".join(str(c) for c in p["crfs"]))
         return p
 
