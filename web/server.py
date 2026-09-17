@@ -93,10 +93,29 @@ def _listdir(d):
         raise HTTPException(502, "讀取 Volume 失敗：{}".format(e))
 
 
+_files_cache = {"at": 0.0, "data": None}
+FILES_TTL = 5      # VolumeListFiles 有速率限制，多開分頁不該讓呼叫次數翻倍
+
+
 @app.get("/api/files")
 def files():
-    return {"in": sorted(_listdir("in"), key=lambda f: f["name"]),
-            "out": sorted(_listdir("out"), key=lambda f: f["name"])}
+    now = time.time()
+    if _files_cache["data"] and now - _files_cache["at"] < FILES_TTL:
+        return _files_cache["data"]
+    try:
+        data = {"in": sorted(_listdir("in"), key=lambda f: f["name"]),
+                "out": sorted(_listdir("out"), key=lambda f: f["name"])}
+    except HTTPException:
+        # 被限流或連線出錯時給上一次的結果並標記，總比讓整個清單消失好
+        if _files_cache["data"]:
+            return dict(_files_cache["data"], stale=True)
+        raise
+    _files_cache.update(at=now, data=data)
+    return data
+
+
+def _invalidate_files():
+    _files_cache["at"] = 0.0
 
 
 @app.delete("/api/files")
@@ -110,6 +129,7 @@ def remove_file(path: str):
     except Exception as e:
         # 別讓它變成內容空洞的 500 —— 前端只能把訊息原樣顯示給人看
         raise HTTPException(502, "刪除失敗：{}".format(e))
+    _invalidate_files()
     return {"ok": True}
 
 
@@ -392,8 +412,52 @@ def download(path: str):
 # 上傳：瀏覽器 PUT 原始 body → 本機暫存檔 → Modal Volume
 # --------------------------------------------------------------------------
 
+def _progress_cb(uid):
+    """Modal 的上傳進度回呼。
+
+    protocol：cb(name=, size=) 回傳 task_id；之後 cb(task_id, advance=n)；
+    結束時 cb(task_id=, complete=True)。advance 來自真正的網路上傳，
+    不含算雜湊那一遍。
+    """
+    def cb(task_id=None, **kw):
+        u = UPLOADS.get(uid)
+        if u is not None:
+            if kw.get("size"):
+                u["total"] = kw["size"]
+            if kw.get("advance"):
+                u["sent"] = min(u["total"], u["sent"] + kw["advance"])
+            if kw.get("complete"):
+                u["sent"] = u["total"]
+        return 0
+    return cb
+
+
+def _upload_with_progress(src_path, remote, uid) -> bool:
+    """用 Modal 自己的進度回呼上傳。成功回傳 True。
+
+    batch_upload() 沒有把 progress_cb 露出來，所以走跟 modal CLI 同一條路。
+    那是內部 API，因此失敗就退回估算版，讓上傳本身不會因為它而壞掉。
+    """
+    try:
+        from modal.volume import AbstractVolumeUploadContextManager
+        v = vol()
+        v.hydrate()
+        with AbstractVolumeUploadContextManager.resolve(
+                v._get_metadata().version, v.object_id, v.client,
+                progress_cb=_progress_cb(uid), force=True) as batch:
+            batch.put_file(src_path, remote)
+        return True
+    except Exception as e:
+        print("進度回呼版上傳失敗，改用估算版：{!r}".format(e), flush=True)
+        return False
+
+
 class _Counting:
-    """包住檔案物件，一邊被讀一邊回報進度。"""
+    """退路：包住檔案物件，一邊被讀一邊估進度。
+
+    Modal 會把檔案讀不只一遍（先算雜湊再上傳），所以這個計數會偏快 ——
+    只在上面那條路走不通時才用。
+    """
 
     def __init__(self, fp, uid):
         self._fp = fp
@@ -414,10 +478,13 @@ def _to_modal(src_path, remote, uid, size, cleanup=True):
     """把本機檔案推到 Volume。cleanup=False 時不刪來源（路徑模式用的是原檔）。"""
     UPLOADS[uid].update(phase="modal", sent=0, total=size)
     try:
-        with open(src_path, "rb") as fp:
-            with vol().batch_upload(force=True) as batch:
-                batch.put_file(_Counting(fp, uid), remote)
-        UPLOADS[uid].update(phase="done", sent=size, ended=time.time())
+        if not _upload_with_progress(src_path, remote, uid):
+            UPLOADS[uid].update(sent=0)
+            with open(src_path, "rb") as fp:
+                with vol().batch_upload(force=True) as batch:
+                    batch.put_file(_Counting(fp, uid), remote)
+        UPLOADS[uid].update(phase="done", sent=UPLOADS[uid]["total"], ended=time.time())
+        _invalidate_files()
     except Exception as e:
         UPLOADS[uid].update(phase="error", error=repr(e), ended=time.time())
     finally:
