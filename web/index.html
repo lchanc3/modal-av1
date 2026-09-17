@@ -146,10 +146,7 @@
           <div style="font-size:13px;margin-top:8px">把影片拖進來，或點這裡選檔</div>
         </div>
         <input type="file" id="file" class="hide">
-        <div id="up" class="hide" style="margin-top:14px">
-          <div class="spread"><span class="muted" id="upLabel"></span><span class="muted mono" id="upPct"></span></div>
-          <div class="bar" style="margin-top:6px"><i id="upBar" style="width:0"></i></div>
-        </div>
+        <div id="up" class="hide"></div>
       </div>
 
       <div class="card">
@@ -275,36 +272,40 @@ $("drop").addEventListener("drop", e => {
 
 function doUpload(file) {
   const uid = Math.random().toString(16).slice(2, 10);
-  $("up").classList.remove("hide");
-  setUp("① 瀏覽器 → 本機 server", 0);
-
   const xhr = new XMLHttpRequest();
   xhr.open("PUT", `/api/upload?name=${encodeURIComponent(file.name)}&uid=${uid}`);
-  xhr.upload.onprogress = e => {
-    if (e.lengthComputable) setUp("① 瀏覽器 → 本機 server", e.loaded / e.total * 100);
-  };
-  xhr.upload.onload = () => { setUp("② 本機 server → Modal Volume", 0); pollUp(uid); };
-  xhr.onload = () => {
-    if (xhr.status === 200) { setUp("上傳完成", 100); loadFiles(); }
-    else setUp("上傳失敗：" + xhr.responseText, 0);
-  };
-  xhr.onerror = () => setUp("上傳失敗（連線中斷）", 0);
+  xhr.onload = () => { if (xhr.status !== 200) alert("上傳失敗：" + xhr.responseText); loadFiles(); };
+  xhr.onerror = () => alert("上傳失敗（連線中斷）");
   xhr.send(file);
+  loadUploads();     // 進度由 server 回報，不靠這個分頁的 XHR 事件
 }
 
-function setUp(label, pct) {
-  $("upLabel").textContent = label;
-  $("upPct").textContent = pct ? pct.toFixed(1) + "%" : "";
-  $("upBar").style.width = pct + "%";
-}
+const UP_PHASE = {
+  local: "① 瀏覽器 → 本機 server",
+  modal: "② 本機 server → Modal Volume",
+  done:  "上傳完成",
+  error: "上傳失敗",
+};
 
-async function pollUp(uid) {
-  const t = setInterval(async () => {
-    const u = await fetch("/api/upload/" + uid).then(r => r.json()).catch(() => null);
-    if (!u || u.phase === "unknown") return;
-    if (u.phase === "modal" && u.total) setUp("② 本機 server → Modal Volume", u.sent / u.total * 100);
-    if (u.phase === "done" || u.phase === "error") clearInterval(t);
-  }, 700);
+// 上傳進度一律讀 server 的狀態，所以重新整理、換分頁都還看得到，
+// 而且階段②（可能要跑十幾分鐘）不會像以前那樣完全沒有顯示。
+async function loadUploads() {
+  const ups = await fetch("/api/uploads").then(r => r.json()).catch(() => null);
+  if (!ups) return;
+  $("up").classList.toggle("hide", ups.length === 0);
+  paint($("up"), ups.map(u => {
+    const pct = u.total ? Math.min(100, u.sent / u.total * 100) : 0;
+    const bad = u.phase === "error";
+    return `<div style="margin-top:14px">
+      <div class="spread">
+        <span class="muted">${esc(u.name)}　${UP_PHASE[u.phase] || u.phase}</span>
+        <span class="muted mono">${pct.toFixed(1)}%</span>
+      </div>
+      <div class="bar ${bad ? "err" : u.phase === "done" ? "ok" : ""}" style="margin-top:6px">
+        <i style="width:${pct}%"></i></div>
+      ${u.error ? `<div class="err">${esc(u.error)}</div>` : ""}
+    </div>`;
+  }).join(""));
 }
 
 // ---- 送件 ----------------------------------------------------------------
@@ -314,7 +315,9 @@ $("test").onchange = e => { $("testOpts").classList.toggle("hide", !e.target.che
 function estimate() {
   if ($("test").checked || !$("name").value) { $("estimate").textContent = ""; return; }
   const cpu = +$("cpu").value, chunk = +$("chunk_sec").value;
-  const dur = window._srcDur || 3600;           // 沒有實際長度就以 1 小時估
+  // server 不知道片長（要問就得開一個容器跑 ffprobe），所以用 1 小時當基準。
+  // 下面的標示會說清楚，免得把估算當成實數看。
+  const dur = window._srcDur || 3600;
   const speed = 0.5 * (cpu / 16) * 1.35;        // 16 核 preset 3 實測 0.5x，核心少時效率略高
   const n = Math.max(1, Math.ceil(dur / chunk));
   const hrs = (dur / speed) / 3600;
@@ -322,7 +325,7 @@ function estimate() {
   const b = window._budget;
   const after = b ? b.remaining - cost : null;
   $("estimate").innerHTML =
-    `${n} 段平行　·　約 ${hhmmss(Math.min(chunk, dur) / speed)}<br>` +
+    `<span style="opacity:.7">以 1 小時片長估</span>　${n} 段　·　約 ${hhmmss(Math.min(chunk, dur) / speed)}<br>` +
     `<span style="color:var(--accent);font-weight:500" class="mono">≈ $${cost.toFixed(2)}</span>` +
     (after === null ? "" :
       `<span class="mono" style="color:${after < 0 ? "var(--err)" : "var(--dim)"}">` +
@@ -449,16 +452,17 @@ async function loadFiles() {
   if (f.in.some(x => x.name === keep)) sel.value = keep;
 
   $("outTotal").textContent = f.out.length ? mib(f.out.reduce((s, x) => s + x.size, 0)) : "";
+  // 路徑放 data-path 而不是塞進 onclick 的字串裡：檔名含單引號會把字串撐破
   paint($("out"), f.out.length ? `<table><tbody>${f.out.map(x => `
     <tr><td>${esc(x.name)}</td><td class="num">${mib(x.size)}</td><td class="act">
       <a class="btn" href="/api/download?path=${encodeURIComponent(x.path)}">下載</a>
-      <button type="button" class="icon" aria-label="刪除 ${esc(x.name)}" onclick="rmFile('${esc(x.path)}')">${ICON_TRASH}</button>
+      <button type="button" class="icon rm" data-path="${esc(x.path)}" aria-label="刪除 ${esc(x.name)}">${ICON_TRASH}</button>
     </td></tr>`).join("")}</tbody></table>`
     : '<p class="muted" style="margin:0">還沒有成品。</p>');
 
   paint($("in"), f.in.length ? `<table><tbody>${f.in.map(x => `
     <tr><td>${esc(x.name)}</td><td class="num">${mib(x.size)}</td><td class="act">
-      <button type="button" class="icon" aria-label="刪除 ${esc(x.name)}" onclick="rmFile('${esc(x.path)}')">${ICON_TRASH}</button>
+      <button type="button" class="icon rm" data-path="${esc(x.path)}" aria-label="刪除 ${esc(x.name)}">${ICON_TRASH}</button>
     </td></tr>`).join("")}</tbody></table>`
     : '<p class="muted" style="margin:0">還沒有原片。</p>');
 
@@ -530,6 +534,11 @@ async function gcWork() {
   loadWork();
 }
 
+document.addEventListener("click", e => {
+  const btn = e.target.closest("button.rm");
+  if (btn) rmFile(btn.dataset.path);
+});
+
 async function rmFile(path) {
   if (!confirm("刪除 " + path + "？無法復原。")) return;
   await fetch("/api/files?path=" + encodeURIComponent(path), {method: "DELETE"});
@@ -551,6 +560,7 @@ function poll(fn, gap) {
   })();
 }
 poll(loadJobs, 2000);
+poll(loadUploads, 2000);   // 純本機記憶體讀取，不花錢
 poll(loadFiles, 15000);
 poll(loadBudget, 300000);  // billing report 有速率限制，server 端也快取 10 分鐘
 </script>

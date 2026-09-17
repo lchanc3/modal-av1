@@ -295,9 +295,9 @@ def _to_modal(tmp_path, remote, uid, size):
         with open(tmp_path, "rb") as fp:
             with vol().batch_upload(force=True) as batch:
                 batch.put_file(_Counting(fp, uid), remote)
-        UPLOADS[uid].update(phase="done", sent=size)
+        UPLOADS[uid].update(phase="done", sent=size, ended=time.time())
     except Exception as e:
-        UPLOADS[uid].update(phase="error", error=repr(e))
+        UPLOADS[uid].update(phase="error", error=repr(e), ended=time.time())
     finally:
         try:
             os.remove(tmp_path)
@@ -331,6 +331,20 @@ async def upload(request: Request, name: str, uid: str = ""):
 @app.get("/api/upload/{uid}")
 def upload_status(uid: str):
     return UPLOADS.get(uid) or {"phase": "unknown"}
+
+
+@app.get("/api/uploads")
+def uploads():
+    """所有進行中的上傳。
+
+    server 端才是唯一真相來源 —— 兩個階段的位元組數它都知道。之前狀態只活在
+    發起上傳的那個分頁裡，重新整理就全部消失，但背後其實還在傳。
+    """
+    now = time.time()
+    for uid in [u for u, v in UPLOADS.items()
+                if v.get("phase") in ("done", "error") and now - v.get("ended", now) > 60]:
+        UPLOADS.pop(uid, None)
+    return [dict(v, uid=u) for u, v in UPLOADS.items()]
 
 
 # --------------------------------------------------------------------------
