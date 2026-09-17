@@ -223,6 +223,121 @@ async def set_allowance(request: Request):
     return {"ok": True, "allowance": v}
 
 
+# --------------------------------------------------------------------------
+# 模板
+# --------------------------------------------------------------------------
+
+TEMPLATES_FILE = os.path.join(ROOT, "templates.json")
+
+# 門檻也跟著模板走：VMAF 量的是「與該來源的距離」，好壓的片源同樣 95 分
+# 的實際觀感並不一樣（e992 只撐到 crf 34，E924 到 36 還有 95.59）。
+TPL_TEXT = ("name", "note", "svt")
+TPL_INT = ("preset", "crf", "gop", "chunk_sec", "cpu")
+TPL_FLOAT = ("min_mean", "min_low")
+
+
+def _load_templates() -> list:
+    try:
+        with open(TEMPLATES_FILE, encoding="utf-8") as f:
+            ts = json.load(f)["templates"]
+        return ts if isinstance(ts, list) else []
+    except Exception:
+        return []
+
+
+def _save_templates(ts: list) -> None:
+    with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "templates": ts}, f, ensure_ascii=False, indent=2)
+
+
+def _clean_template(raw: dict) -> dict:
+    t = {k: str(raw.get(k) or "").strip() for k in TPL_TEXT}
+    if not t["name"]:
+        raise HTTPException(400, "模板需要名稱")
+    for k in TPL_INT:
+        t[k] = int(raw.get(k) or jobspec.DEFAULTS[k])
+    for k in TPL_FLOAT:
+        t[k] = float(raw.get(k) or jobspec.DEFAULTS[k])
+    return t
+
+
+@app.get("/api/templates")
+def list_templates():
+    return _load_templates()
+
+
+@app.post("/api/templates")
+async def save_template(request: Request):
+    body = await request.json()
+    t = _clean_template(body)
+    ts = _load_templates()
+    now = time.time()
+    t["updated"] = now
+
+    tid = body.get("id")
+    if tid:
+        for i, old in enumerate(ts):
+            if old.get("id") == tid:
+                t["id"] = tid
+                t["created"] = old.get("created", now)
+                ts[i] = t
+                break
+        else:
+            raise HTTPException(404, "找不到這個模板")
+    else:
+        t["id"] = uuid.uuid4().hex[:8]
+        t["created"] = now
+        ts.append(t)
+
+    _save_templates(ts)
+    return t
+
+
+@app.delete("/api/templates/{tid}")
+def delete_template(tid: str):
+    ts = _load_templates()
+    left = [t for t in ts if t.get("id") != tid]
+    if len(left) == len(ts):
+        raise HTTPException(404, "找不到這個模板")
+    _save_templates(left)
+    return {"ok": True}
+
+
+@app.post("/api/templates/import")
+async def import_templates(request: Request):
+    body = await request.json()
+    incoming = body.get("templates")
+    if not isinstance(incoming, list):
+        raise HTTPException(400, "格式不對：檔案裡要有 templates 陣列")
+
+    ts = [] if body.get("mode") == "replace" else _load_templates()
+    index = {t.get("id"): i for i, t in enumerate(ts)}
+    added = updated = skipped = 0
+
+    for raw in incoming:
+        if not isinstance(raw, dict):
+            skipped += 1
+            continue
+        try:
+            t = _clean_template(raw)
+        except HTTPException:
+            skipped += 1          # 沒有名稱的直接跳過，不要讓整批匯入失敗
+            continue
+        t["id"] = str(raw.get("id") or uuid.uuid4().hex[:8])
+        t["created"] = float(raw.get("created") or time.time())
+        t["updated"] = time.time()
+        if t["id"] in index:
+            ts[index[t["id"]]] = t
+            updated += 1
+        else:
+            index[t["id"]] = len(ts)
+            ts.append(t)
+            added += 1
+
+    _save_templates(ts)
+    return {"ok": True, "added": added, "updated": updated, "skipped": skipped, "total": len(ts)}
+
+
 @app.get("/api/work")
 def work_stat():
     """work/ 底下的暫存切段。成功的 job 會自己清掉，失敗或取消的會留著供重送沿用。"""

@@ -319,16 +319,55 @@
   </section>
 
   <section class="panel hide" id="panel-preset">
-    <div class="card">
-      <div class="cap" style="margin-bottom:14px">模板</div>
-      <p class="muted" style="margin:0 0 10px">
-        規劃中：為不同攝影團隊／片源類型各存一組參數（preset、crf、gop、svt、
-        每段秒數、每段核心），送件時一鍵套用。可匯出／匯入 JSON。
-      </p>
-      <p class="muted" style="margin:0">
-        門檻（平均／最低 VMAF）也會跟著模板走 —— VMAF 量的是「與該來源的距離」，
-        本身拍得好的片源，同樣 95 分的實際觀感並不一樣。
-      </p>
+    <div class="cols">
+      <aside>
+        <div class="card">
+          <div class="spread" style="margin-bottom:14px">
+            <div class="cap" id="tplFormCap">新增模板</div>
+            <button type="button" id="tplNew" class="hide" onclick="resetTpl()">取消編輯</button>
+          </div>
+          <input type="hidden" id="tplId">
+          <div style="margin-bottom:12px">
+            <label for="tplName">名稱</label>
+            <input id="tplName" placeholder="例如：FacialAbuse 系列">
+          </div>
+          <div style="margin-bottom:12px">
+            <label for="tplNote">備註</label>
+            <input id="tplNote" placeholder="片源特性、掃描出處…">
+          </div>
+          <div class="grid2" style="margin-bottom:12px">
+            <div><label for="tplPreset">preset</label><input class="mono" id="tplPreset" type="number" value="3"></div>
+            <div><label for="tplCrf">crf</label><input class="mono" id="tplCrf" type="number" value="34"></div>
+            <div><label for="tplGop">gop</label><input class="mono" id="tplGop" type="number" value="600"></div>
+            <div><label for="tplChunk">每段秒數</label><input class="mono" id="tplChunk" type="number" value="600"></div>
+            <div><label for="tplCpu">每段核心</label><input class="mono" id="tplCpu" type="number" value="8"></div>
+            <div></div>
+            <div><label for="tplMean">門檻・平均</label><input class="mono" id="tplMean" type="number" step="0.5" value="95"></div>
+            <div><label for="tplLow">門檻・最低</label><input class="mono" id="tplLow" type="number" step="0.5" value="89"></div>
+          </div>
+          <div style="margin-bottom:14px">
+            <label for="tplSvt">svtav1-params</label>
+            <input class="mono" id="tplSvt" style="font-size:12px" value="tune=0:enable-overlays=1:enable-qm=1:film-grain=0">
+          </div>
+          <button type="button" class="primary" onclick="saveTpl()">儲存模板</button>
+        </div>
+
+        <div class="card">
+          <div class="cap" style="margin-bottom:14px">匯出 / 匯入</div>
+          <div class="row">
+            <button type="button" onclick="exportTpl()">匯出 JSON</button>
+            <button type="button" onclick="document.getElementById('tplFile').click()">匯入</button>
+            <input type="file" id="tplFile" accept=".json,application/json" class="hide">
+          </div>
+          <p class="muted" style="margin:12px 0 0">
+            匯入採合併：id 相同的會被覆蓋，其餘新增。沒有名稱的項目會跳過，不會讓整批失敗。
+          </p>
+        </div>
+      </aside>
+
+      <main>
+        <div id="tplList"></div>
+      </main>
     </div>
   </section>
 </div>
@@ -453,6 +492,119 @@ async function submitJob() {
   $("go").disabled = false;
 }
 
+// ---- 模板 ----------------------------------------------------------------
+const TPL_FIELDS = {tplName: "name", tplNote: "note", tplPreset: "preset", tplCrf: "crf",
+                    tplGop: "gop", tplChunk: "chunk_sec", tplCpu: "cpu",
+                    tplMean: "min_mean", tplLow: "min_low", tplSvt: "svt"};
+
+function resetTpl() {
+  $("tplId").value = "";
+  $("tplFormCap").textContent = "新增模板";
+  $("tplNew").classList.add("hide");
+  const d = {name: "", note: "", preset: 3, crf: 34, gop: 600, chunk_sec: 600, cpu: 8,
+             min_mean: 95, min_low: 89,
+             svt: "tune=0:enable-overlays=1:enable-qm=1:film-grain=0"};
+  for (const [id, key] of Object.entries(TPL_FIELDS)) $(id).value = d[key];
+}
+
+function fillTpl(t, {editing = false} = {}) {
+  $("tplId").value = editing ? (t.id || "") : "";
+  $("tplFormCap").textContent = editing ? "編輯模板" : "新增模板";
+  $("tplNew").classList.toggle("hide", !editing);
+  for (const [id, key] of Object.entries(TPL_FIELDS))
+    if (t[key] != null) $(id).value = t[key];
+  showTab("preset");
+  $("tplName").focus();
+}
+
+async function saveTpl() {
+  const body = {id: $("tplId").value || undefined};
+  for (const [id, key] of Object.entries(TPL_FIELDS)) body[key] = $(id).value;
+  if (!body.name.trim()) return alert("模板需要名稱");
+  const r = await fetch("/api/templates", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!r.ok) return alert("儲存失敗：" + await r.text());
+  resetTpl();
+  loadTemplates();
+}
+
+async function loadTemplates() {
+  const ts = await fetch("/api/templates").then(r => r.json()).catch(() => null);
+  if (!ts) return;
+  window._tpl = ts;
+  paint($("tplList"), ts.length ? ts.map(t => `
+    <div class="card" style="margin-bottom:16px">
+      <div class="spread" style="align-items:flex-start">
+        <div style="min-width:0">
+          <div style="font-family:var(--serif);font-size:19px;font-weight:600">${esc(t.name)}</div>
+          ${t.note ? `<div class="muted" style="margin-top:4px">${esc(t.note)}</div>` : ""}
+        </div>
+        <div class="row">
+          <button type="button" class="primary tpl-apply" data-id="${t.id}">套用到送件</button>
+          <button type="button" class="tpl-edit" data-id="${t.id}">編輯</button>
+          <button type="button" class="tpl-del" data-id="${t.id}">刪除</button>
+        </div>
+      </div>
+      <div class="mono muted" style="margin-top:12px;font-size:12px">
+        preset ${t.preset}　crf ${t.crf}　gop ${t.gop}　每段 ${t.chunk_sec}s × ${t.cpu} 核　·
+        門檻 ${t.min_mean} / ${t.min_low}
+      </div>
+      <div class="mono muted" style="margin-top:4px;font-size:11.5px;word-break:break-all">${esc(t.svt)}</div>
+    </div>`).join("")
+    : '<div class="card"><p class="muted" style="margin:0">還沒有模板。左邊可以新增，或從「測試」分頁的掃描結果一鍵建立。</p></div>');
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("button[data-id]");
+  if (!b) return;
+  const t = (window._tpl || []).find(x => x.id === b.dataset.id);
+  if (!t) return;
+  if (b.classList.contains("tpl-apply")) applyTpl(t);
+  else if (b.classList.contains("tpl-edit")) fillTpl(t, {editing: true});
+  else if (b.classList.contains("tpl-del")) delTpl(t);
+});
+
+function applyTpl(t) {
+  $("preset").value = t.preset; $("crf").value = t.crf; $("gop").value = t.gop;
+  $("chunk_sec").value = t.chunk_sec; $("cpu").value = t.cpu; $("svt").value = t.svt;
+  $("swPreset").value = t.preset; $("swCpu").value = t.cpu; $("swSvt").value = t.svt;
+  $("swMean").value = t.min_mean; $("swLow").value = t.min_low;
+  showTab("encode");
+  estimate();
+}
+
+async function delTpl(t) {
+  if (!confirm(`刪除模板「${t.name}」？`)) return;
+  await fetch("/api/templates/" + t.id, {method: "DELETE"});
+  loadTemplates();
+}
+
+function exportTpl() {
+  const blob = new Blob([JSON.stringify({version: 1, templates: window._tpl || []}, null, 2)],
+                        {type: "application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "modal-av1-templates.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+$("tplFile").onchange = async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  e.target.value = "";
+  try {
+    const data = JSON.parse(await f.text());
+    const r = await fetch("/api/templates/import", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({templates: data.templates || data, mode: "merge"})});
+    if (!r.ok) throw new Error(await r.text());
+    const s = await r.json();
+    alert(`匯入完成：新增 ${s.added}、更新 ${s.updated}、跳過 ${s.skipped}，共 ${s.total} 個`);
+    loadTemplates();
+  } catch (err) { alert("匯入失敗：" + err.message); }
+};
+
 // ---- 測試：產生 ref 與掃描 crf ---------------------------------------------
 async function post(body) {
   const r = await fetch("/api/jobs", {
@@ -484,6 +636,18 @@ async function startSweep() {
   } catch (e) { alert("失敗：" + e.message); }
   $("swGo").disabled = false;
 }
+
+// 掃描結果 → 模板：把量到的數字連同出處一起帶進表單，省得自己抄
+document.addEventListener("click", e => {
+  const b = e.target.closest("button.sweep-save");
+  if (!b) return;
+  const ref = (window._lastSweepRef || "").replace(/^in\//, "");
+  fillTpl({
+    name: "", note: `由 ${ref} 掃描：crf ${b.dataset.crf}，平均 ${b.dataset.mean} / 最低 ${b.dataset.low}`,
+    crf: +b.dataset.crf, preset: +$("swPreset").value, cpu: +$("swCpu").value,
+    svt: $("swSvt").value, min_mean: +$("swMean").value, min_low: +$("swLow").value,
+  });
+});
 
 function sweepEstimate() {
   const crfs = $("swCrfs").value.split(",").filter(s => s.trim()).length;
@@ -608,6 +772,8 @@ function sweepTable(j) {
       <td class="num" style="color:${r.vmaf_min >= j.min_low ? "var(--ok)" : "var(--err)"}">${r.vmaf_min.toFixed(2)}</td>
       <td class="num">${r.d_vmaf == null ? "—" : r.d_vmaf.toFixed(2)}</td>
       <td class="num">${r.d_size == null ? "—" : (r.d_size / 1048576).toFixed(2) + " MiB"}</td>
+      <td class="act"><button type="button" class="sweep-save" data-crf="${r.crf}"
+        data-mean="${r.vmaf_mean.toFixed(2)}" data-low="${r.vmaf_min.toFixed(2)}">存成模板</button></td>
     </tr>`;
   }).join("");
   return `<div class="cap" style="margin-bottom:12px">掃描結果</div>
@@ -615,7 +781,7 @@ function sweepTable(j) {
     <table><thead><tr>
       <td class="muted">參數</td><td class="num muted">體積</td><td class="num muted">平均</td>
       <td class="num muted">調和</td><td class="num muted">最低</td>
-      <td class="num muted">ΔVMAF</td><td class="num muted">Δ體積</td>
+      <td class="num muted">ΔVMAF</td><td class="num muted">Δ體積</td><td></td>
     </tr></thead><tbody>${rows}</tbody></table>
     ${j.pick == null
       ? '<p class="warn" style="margin:12px 0 0">沒有任何 crf 同時滿足兩個門檻 —— 把階梯往下延伸（更低的 crf），或放寬門檻。</p>'
@@ -638,6 +804,7 @@ async function loadJobs() {
     const merged = mergeSweeps(sweeps, latest.ref);
     const ok = merged.filter(r => r.vmaf_mean >= latest.min_mean && r.vmaf_min >= latest.min_low);
     const pick = ok.length ? ok.reduce((a, b) => a.size <= b.size ? a : b).crf : null;
+    window._lastSweepRef = latest.ref;
     paint($("sweepResult"), sweepTable({...latest, table: merged, pick}));
   } else {
     paint($("sweepResult"),
@@ -775,6 +942,9 @@ function poll(fn, gap) {
     setTimeout(loop, gap);
   })();
 }
+resetTpl();
+loadTemplates();           // 模板只有這台機器會改，不需要輪詢
+
 poll(loadJobs, 2000);
 poll(loadUploads, 2000);   // 純本機記憶體讀取，不花錢
 poll(loadFiles, 15000);
