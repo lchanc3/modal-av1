@@ -714,6 +714,35 @@ async function startSweep() {
   $("swGo").disabled = false;
 }
 
+// 掃描結果 → 送件：直接把選定的 crf 帶進轉檔表單。
+// 沒有這個捷徑就得自己記數字再切分頁手動改，E924 那次就是這樣讓預設的 34
+// 溜過去、白白多了 143 MiB。
+document.addEventListener("click", e => {
+  const b = e.target.closest("button.sweep-use");
+  if (!b) return;
+  $("crf").value = b.dataset.crf;
+  $("preset").value = $("swPreset").value;
+  $("svt").value = $("swSvt").value;
+
+  const sel = $("name");
+  let src = window._lastSweepSrc || "";
+  if (!src && window._lastSweepRef) {
+    // 用舊的兩步流程送的掃描只記得 ref 檔名。ref 是由原片推導的
+    // （去副檔名、空格換底線、加長度），所以反推回去比對就找得到原片。
+    const ref = window._lastSweepRef.replace(/^in\//, "");
+    src = ([...sel.options].map(o => o.value).find(n => {
+      const stem = n.replace(/\.[^.]+$/, "").replace(/ /g, "_");
+      return ref.startsWith(`ref_${stem}_`);
+    })) || "";
+  }
+  const hasSrc = src && [...sel.options].some(o => o.value === src);
+  if (hasSrc) sel.value = src;
+
+  showTab("encode");
+  estimate();
+  toast(`已帶入 crf ${b.dataset.crf}` + (hasSrc ? `，來源 ${src}` : "，來源請自己選"));
+});
+
 // 掃描結果 → 模板：把量到的數字連同出處一起帶進表單，省得自己抄
 document.addEventListener("click", e => {
   const b = e.target.closest("button.sweep-save");
@@ -849,8 +878,13 @@ function sweepTable(j) {
       <td class="num" style="color:${r.vmaf_min >= j.min_low ? "var(--ok)" : "var(--err)"}">${r.vmaf_min.toFixed(2)}</td>
       <td class="num">${r.d_vmaf == null ? "—" : r.d_vmaf.toFixed(2)}</td>
       <td class="num">${r.d_size == null ? "—" : (r.d_size / 1048576).toFixed(2) + " MiB"}</td>
-      <td class="act"><button type="button" class="sweep-save" data-crf="${r.crf}"
-        data-mean="${r.vmaf_mean.toFixed(2)}" data-low="${r.vmaf_min.toFixed(2)}">存成模板</button></td>
+      <td class="act">
+        <button type="button" class="sweep-use" data-crf="${r.crf}"
+          title="把這組參數帶進送件表單">送件</button>
+        <button type="button" class="sweep-save" data-crf="${r.crf}"
+          data-mean="${r.vmaf_mean.toFixed(2)}" data-low="${r.vmaf_min.toFixed(2)}"
+          title="把這組參數與出處存成模板">模板</button>
+      </td>
     </tr>`;
   }).join("");
   return `<div class="cap" style="margin-bottom:12px">掃描結果</div>
@@ -882,6 +916,8 @@ async function loadJobs() {
     const ok = merged.filter(r => r.vmaf_mean >= latest.min_mean && r.vmaf_min >= latest.min_low);
     const pick = ok.length ? ok.reduce((a, b) => a.size <= b.size ? a : b).crf : null;
     window._lastSweepRef = latest.ref;
+    // 合併流程送出時的 name 就是原片；直接挑現成 ref 掃描的話 name 會是 ref 檔本身
+    window._lastSweepSrc = latest.name && !latest.name.startsWith("ref_") ? latest.name : "";
     paint($("sweepResult"), sweepTable({...latest, table: merged, pick}));
   } else {
     paint($("sweepResult"),
