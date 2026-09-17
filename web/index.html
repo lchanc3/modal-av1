@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>modal-av1</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f25; --line: #2b3038; --fg: #e6e8eb;
+    --dim: #949aa4; --accent: #5aa9e6; --ok: #4cc38a; --warn: #e8b339; --err: #e5634d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+         font: 14px/1.6 "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif; }
+  .wrap { max-width: 1040px; margin: 0 auto; display: grid; gap: 20px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  h1 small { color: var(--dim); font-weight: 400; font-size: 13px; margin-left: 10px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+  h2 { font-size: 14px; margin: 0 0 14px; font-weight: 600; color: var(--dim);
+       text-transform: uppercase; letter-spacing: .06em; }
+  label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+  input, select, button { font: inherit; }
+  input, select { background: #121418; color: var(--fg); border: 1px solid var(--line);
+                  border-radius: 6px; padding: 7px 9px; width: 100%; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  button { background: #2a2f38; color: var(--fg); border: 1px solid var(--line);
+           border-radius: 6px; padding: 7px 14px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #08121a; font-weight: 600; }
+  button.danger:hover { border-color: var(--err); color: var(--err); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 26px; text-align: center;
+          color: var(--dim); cursor: pointer; transition: .15s; }
+  .drop.hot { border-color: var(--accent); color: var(--accent); background: #1a2028; }
+  .bar { height: 6px; background: #121418; border-radius: 3px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+  .bar.ok > i { background: var(--ok); }
+  .bar.err > i { background: var(--err); }
+  .job { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 10px; }
+  .chunks { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+            gap: 8px; margin-top: 12px; }
+  .chunk { font-size: 11px; color: var(--dim); }
+  .chunk .bar { margin-top: 3px; }
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); }
+  .tag.run { color: var(--accent); border-color: var(--accent); }
+  .tag.done { color: var(--ok); border-color: var(--ok); }
+  .tag.err { color: var(--err); border-color: var(--err); }
+  .tag.idle { color: var(--dim); }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 7px 4px; border-bottom: 1px solid var(--line); }
+  td.num { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
+  .muted { color: var(--dim); font-size: 12px; }
+  .warn { color: var(--warn); font-size: 12px; }
+  .err { color: var(--err); font-size: 12px; word-break: break-all; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="spread">
+    <h1>modal-av1 <small>切段並行轉檔 · 送件後可關掉本頁</small></h1>
+    <button class="danger" onclick="stopApp()">強制停止整個 App</button>
+  </div>
+
+  <section>
+    <h2>上傳原片</h2>
+    <div class="drop" id="drop">把影片拖進來，或點這裡選檔</div>
+    <input type="file" id="file" class="hide">
+    <div id="up" class="hide" style="margin-top:12px">
+      <div class="spread"><span class="muted" id="upLabel"></span><span class="muted mono" id="upPct"></span></div>
+      <div class="bar" style="margin-top:6px"><i id="upBar" style="width:0"></i></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>送件</h2>
+    <div class="grid">
+      <div style="grid-column: span 2">
+        <label>來源（Volume in/）</label>
+        <select id="name"></select>
+      </div>
+      <div><label>preset</label><input id="preset" type="number" value="3" min="0" max="13"></div>
+      <div><label>crf</label><input id="crf" type="number" value="34" min="1" max="63"></div>
+      <div><label>gop</label><input id="gop" type="number" value="600"></div>
+      <div><label>每段秒數</label><input id="chunk_sec" type="number" value="600"></div>
+      <div><label>每段核心</label><input id="cpu" type="number" value="8" min="1" max="32"></div>
+    </div>
+    <div style="margin-top:12px">
+      <label>svtav1-params</label>
+      <input id="svt" class="mono" value="tune=0:enable-overlays=1:enable-qm=1:film-grain=0">
+    </div>
+    <div class="row" style="margin-top:14px">
+      <label class="row" style="margin:0"><input type="checkbox" id="test" style="width:auto"> <span>只轉測試片段</span></label>
+      <span id="testOpts" class="row hide">
+        <label style="margin:0">起點</label><input id="start" value="00:05:00" style="width:100px">
+        <label style="margin:0">長度(秒)</label><input id="dur" type="number" value="20" style="width:80px">
+        <label style="margin:0">tag</label><input id="tag" placeholder="自動" style="width:120px">
+      </span>
+    </div>
+    <div class="spread" style="margin-top:16px">
+      <span class="muted" id="estimate"></span>
+      <button class="primary" id="go" onclick="submitJob()">送出</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>工作</h2>
+    <div id="jobs"><p class="muted">還沒有工作。</p></div>
+  </section>
+
+  <section>
+    <h2>成品（Volume out/）</h2>
+    <div id="out"></div>
+  </section>
+
+  <section>
+    <h2>原片（Volume in/）</h2>
+    <div id="in"></div>
+  </section>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const mib = b => b >= 1073741824 ? (b/1073741824).toFixed(2)+" GiB" : (b/1048576).toFixed(1)+" MiB";
+const hhmmss = s => { s = Math.max(0, Math.round(s));
+  return [Math.floor(s/3600), Math.floor(s/60)%60, s%60].map(n => String(n).padStart(2,"0")).join(":"); };
+
+let expanded = new Set();
+
+// ---- 上傳 ----------------------------------------------------------------
+const drop = $("drop"), filePick = $("file");
+drop.onclick = () => filePick.click();
+filePick.onchange = e => e.target.files[0] && doUpload(e.target.files[0]);
+["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add("hot"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.remove("hot"); }));
+drop.addEventListener("drop", e => {
+  const f = e.dataTransfer.files[0]; if (f) doUpload(f);
+});
+
+function doUpload(file) {
+  const uid = Math.random().toString(16).slice(2, 10);
+  $("up").classList.remove("hide");
+  setUp("傳到本機 server…", 0);
+
+  const xhr = new XMLHttpRequest();
+  xhr.open("PUT", `/api/upload?name=${encodeURIComponent(file.name)}&uid=${uid}`);
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) setUp("① 瀏覽器 → 本機 server", e.loaded / e.total * 100);
+  };
+  xhr.upload.onload = () => { setUp("② 本機 server → Modal Volume", 0); pollUp(uid); };
+  xhr.onload = () => {
+    if (xhr.status === 200) { setUp("上傳完成", 100); loadFiles(); }
+    else { setUp("上傳失敗：" + xhr.responseText, 0); }
+  };
+  xhr.onerror = () => setUp("上傳失敗（連線中斷）", 0);
+  xhr.send(file);
+}
+
+function setUp(label, pct) {
+  $("upLabel").textContent = label;
+  $("upPct").textContent = pct ? pct.toFixed(1) + "%" : "";
+  $("upBar").style.width = pct + "%";
+}
+
+async function pollUp(uid) {
+  const t = setInterval(async () => {
+    const u = await fetch("/api/upload/" + uid).then(r => r.json()).catch(() => null);
+    if (!u || u.phase === "unknown") return;
+    if (u.phase === "modal" && u.total) setUp("② 本機 server → Modal Volume", u.sent / u.total * 100);
+    if (u.phase === "done" || u.phase === "error") clearInterval(t);
+  }, 700);
+}
+
+// ---- 送件 ----------------------------------------------------------------
+$("test").onchange = e => {
+  $("testOpts").classList.toggle("hide", !e.target.checked);
+  estimate();
+};
+["preset","crf","chunk_sec","cpu","name"].forEach(id => $(id).onchange = estimate);
+
+function estimate() {
+  const src = window._in?.find(f => f.name === $("name").value);
+  if (!src || $("test").checked) { $("estimate").textContent = ""; return; }
+  const cpu = +$("cpu").value, chunk = +$("chunk_sec").value;
+  // 16 核 preset 3 實測 0.5x，速度大致隨核心數遞減
+  const speed = 0.5 * (cpu / 16) * 1.35;
+  const dur = 3740;   // 只是給個量級，實際長度以來源為準
+  const n = Math.ceil(dur / chunk);
+  const hrs = (dur / speed) / 3600;
+  const cost = hrs * (cpu * 0.0000131 + (cpu * 1024 / 1024) * 0.00000222) * 3600;
+  $("estimate").textContent =
+    `約 ${n} 段平行、每段約 ${hhmmss(chunk / speed)}，合計約 $${cost.toFixed(2)}（以 62 分鐘片長估）`;
+}
+
+async function submitJob() {
+  const body = {
+    name: $("name").value,
+    preset: +$("preset").value, crf: +$("crf").value, gop: +$("gop").value,
+    chunk_sec: +$("chunk_sec").value, cpu: +$("cpu").value, svt: $("svt").value,
+    test: $("test").checked, start: $("start").value, dur: +$("dur").value,
+    tag: $("tag").value || "",
+  };
+  if (!body.name) return alert("先選一個來源檔");
+  $("go").disabled = true;
+  try {
+    const r = await fetch("/api/jobs", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    if (!r.ok) throw new Error(await r.text());
+    await loadJobs();
+  } catch (e) { alert("送出失敗：" + e.message); }
+  $("go").disabled = false;
+}
+
+// ---- 工作 ----------------------------------------------------------------
+const STATE = {
+  queued:    ["排隊中", "idle"], splitting: ["切段中", "run"],
+  encoding:  ["編碼中", "run"],  merging:   ["合併中", "run"],
+  done:      ["完成",   "done"], error:     ["失敗",   "err"],
+  cancelled: ["已取消", "idle"],
+};
+
+async function loadJobs() {
+  const list = await fetch("/api/jobs").then(r => r.json());
+  const box = $("jobs");
+  if (!list.length) { box.innerHTML = '<p class="muted">還沒有工作。</p>'; return; }
+
+  // 清單本身已含整體進度與 stale 標記，只有展開的才需要再抓每段明細
+  const details = await Promise.all(list.map(j =>
+    expanded.has(j.job_id)
+      ? fetch("/api/jobs/" + j.job_id).then(r => r.json()) : Promise.resolve(j)));
+
+  const html = details.map(j => {
+    const [text, cls] = STATE[j.state] || [j.state, "idle"];
+    const running = !["done","error","cancelled"].includes(j.state);
+    const chunks = (j.chunks || []).map(c => `
+      <div class="chunk">
+        <div>#${String(c.idx).padStart(2,"0")} ${c.state === "done" ? "✓" : (c.pct||0).toFixed(0)+"%"}
+          ${c.fps ? `<span class="mono">${c.fps.toFixed(0)}fps</span>` : ""}</div>
+        <div class="bar ${c.state==="done"?"ok":""}"><i style="width:${c.pct||0}%"></i></div>
+      </div>`).join("");
+    return `
+      <div class="job">
+        <div class="spread">
+          <div>
+            <b>${j.name}</b> <span class="tag ${cls}">${text}</span>
+            ${j.stale ? '<span class="tag err">driver 已消失</span>' : ""}
+            <div class="muted mono">${j.job_id} → ${j.out_name}</div>
+          </div>
+          <div class="row">
+            <span class="mono">${j.pct.toFixed(1)}%</span>
+            ${running ? `<button class="danger" onclick="cancelJob('${j.job_id}')">取消</button>` : ""}
+            ${j.total_chunks > 1 ? `<button onclick="toggle('${j.job_id}')">${expanded.has(j.job_id)?"收合":"每段"}</button>` : ""}
+            ${!running ? `<button onclick="forgetJob('${j.job_id}')">移除</button>` : ""}
+          </div>
+        </div>
+        <div class="bar ${j.state==="done"?"ok":j.state==="error"?"err":""} " style="margin-top:10px">
+          <i style="width:${j.pct}%"></i></div>
+        ${j.size ? `<div class="muted" style="margin-top:6px">${mib(j.size)}　來源 ${hhmmss(j.src_duration||0)} → 輸出 ${hhmmss(j.out_duration||0)}</div>` : ""}
+        ${j.warning ? `<div class="warn" style="margin-top:6px">⚠ ${j.warning}</div>` : ""}
+        ${j.error ? `<div class="err" style="margin-top:6px">${j.error}</div>` : ""}
+        ${(expanded.has(j.job_id) && chunks) ? `<div class="chunks">${chunks}</div>` : ""}
+      </div>`;
+  }).join("");
+
+  // 內容沒變就不要動 DOM：工作都結束後仍每 2 秒重寫會閃爍，也會干擾操作
+  if (html !== box._last) { box.innerHTML = html; box._last = html; }
+}
+
+function toggle(id) { expanded.has(id) ? expanded.delete(id) : expanded.add(id); loadJobs(); }
+async function cancelJob(id) {
+  if (!confirm("確定取消這個工作？已編碼的段落會留在 Volume 上。")) return;
+  await fetch(`/api/jobs/${id}/cancel`, {method: "POST"}); loadJobs();
+}
+async function forgetJob(id) {
+  await fetch("/api/jobs/" + id, {method: "DELETE"}); loadJobs();
+}
+
+// ---- 檔案 ----------------------------------------------------------------
+async function loadFiles() {
+  const f = await fetch("/api/files").then(r => r.json());
+  window._in = f.in;
+
+  const sel = $("name"), keep = sel.value;
+  sel.innerHTML = f.in.map(x => `<option>${x.name}</option>`).join("")
+                  || '<option value="">（先上傳原片）</option>';
+  if (f.in.some(x => x.name === keep)) sel.value = keep;
+
+  $("out").innerHTML = f.out.length ? `<table>${f.out.map(x => `
+    <tr><td>${x.name}</td><td class="num">${mib(x.size)}</td>
+    <td class="num" style="width:150px">
+      <a href="/api/download?path=${encodeURIComponent(x.path)}"><button>下載</button></a>
+      <button class="danger" onclick="rmFile('${x.path}')">刪除</button></td></tr>`).join("")}</table>`
+    : '<p class="muted">還沒有成品。</p>';
+
+  $("in").innerHTML = f.in.length ? `<table>${f.in.map(x => `
+    <tr><td>${x.name}</td><td class="num">${mib(x.size)}</td>
+    <td class="num" style="width:80px">
+      <button class="danger" onclick="rmFile('${x.path}')">刪除</button></td></tr>`).join("")}</table>`
+    : '<p class="muted">還沒有原片。</p>';
+
+  estimate();
+}
+
+async function rmFile(path) {
+  if (!confirm("刪除 " + path + "？無法復原。")) return;
+  await fetch("/api/files?path=" + encodeURIComponent(path), {method: "DELETE"});
+  loadFiles();
+}
+
+async function stopApp() {
+  if (!confirm("這會停掉整個 av1-encode App，所有執行中的容器都會被終止。確定？")) return;
+  const r = await fetch("/api/stop-app", {method: "POST"}).then(r => r.json());
+  alert(r.ok ? "已停止" : "失敗：" + r.out);
+  loadJobs();
+}
+
+// 自排程輪詢，不用 setInterval：每輪等上一輪結束才排下一輪，
+// 否則請求慢的時候會無止境堆疊。
+function poll(fn, gap) {
+  (async function loop() {
+    try { await fn(); } catch (e) { /* 網路瞬斷就下一輪再說 */ }
+    setTimeout(loop, gap);
+  })();
+}
+
+poll(loadJobs, 2000);      // poll 會立刻跑第一輪，不需要另外呼叫一次
+poll(loadFiles, 15000);
+</script>
+</body>
+</html>

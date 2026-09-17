@@ -1,0 +1,13 @@
+# pip install -r requirements.txt
+#
+# 實測版本：modal 1.5.5 / fastapi 0.141.1 / uvicorn 0.53.0（2026-09-17）
+
+modal>=1.5.5        # 需要 @app.function 的 nonpreemptible 參數，以及 Dict.items()
+fastapi>=0.110      # web/server.py
+uvicorn>=0.27       # web/server.py 的 ASGI server
+
+# 不需要 python-multipart：上傳是用 PUT 送原始 body（見 web/server.py 的
+# /api/upload），沒有走 multipart 表單解析。
+#
+# 本機打分（vmaf.py）另外需要含 libvmaf 的 ffmpeg，例如 gyan.dev 的 full build，
+# 那是系統相依，不由 pip 管理。

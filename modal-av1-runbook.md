@@ -1,0 +1,386 @@
+# Modal × SVT-AV1 雲端轉檔手冊
+
+用 Modal Starter 方案每月 30 美元的免費額度，在雲端跑 SVT-AV1 轉檔。
+長片會**切成多段平行編碼**（見第 3 節），本機只負責上傳、下達指令、下載和打分。
+
+本機開 `start-web.bat` 就有完整的控制台；送出之後關掉網頁、關機都不影響雲端的工作。
+
+---
+
+## 1. 為什麼用 Modal
+
+| 環境 | 核心 / 執行緒 | 1080p60 實測 | 備註 |
+|---|---|---|---|
+| 本機 R5 3600 | 6 / 12 | preset 4：約 0.166x | 不用上傳下載 |
+| Kaggle CPU（EPYC 7B12） | 2 / 4 | preset 6：約 0.057x | 單次 12 小時上限，長片跑不完 |
+| **Modal 16 核** | 16 / 32 | **preset 4：約 0.57x** | 可背景執行，按秒計費 |
+
+- Modal CPU 以**實體核心**計價（1 core = 2 執行緒）。
+- 16 核 + 16 GiB 約 **0.88 美元 / 小時**，30 美元約可跑 34 小時。
+- 低價費率為可搶佔（preemptible），被中斷時會依 `retries` 自動重跑。
+
+---
+
+## 2. 初次設定（只做一次）
+
+```bat
+cd /d <你的資料夾>\modal-av1
+python -m venv .venv
+.venv\Scripts\activate
+
+python -m pip install --upgrade pip
+pip install modal
+modal setup
+
+modal volume create videos
+```
+
+- `modal setup` 的登入 token 存在 `%USERPROFILE%\.modal.toml`，重建 venv 不需重新登入。
+- PowerShell 啟用 venv 用 `.venv\Scripts\Activate.ps1`；若被擋，先執行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
+- 之後每次開新的終端機，都要先 `cd` 到資料夾並啟用 venv。
+
+### Volume 目錄結構
+
+```
+videos/
+├── in/    原片、ref 參考片
+└── out/   轉檔輸出、測試檔
+```
+
+---
+
+## 3. 架構與檔案
+
+```
+modal-av1/
+├── encode.py      Modal 端：split / encode_chunk / merge / run_job / encode_clip
+├── jobspec.py     送件的共用邏輯（CLI 與網頁都走這支）
+├── submit.py      CLI 送件
+├── cancel.py      用 call id 取消
+├── cleanup.py     清理 Volume
+├── vmaf.py        本機 VMAF 批次打分
+├── start-web.bat  啟動本機控制台
+└── web/
+    ├── server.py  FastAPI，只綁 127.0.0.1
+    └── index.html 單頁介面
+```
+
+### 3.1 為什麼要切段
+
+可搶佔實例會被回收。一支 62 分鐘的片用單一 16 核容器跑要 2 小時，
+**一旦被回收，ffmpeg 沒有斷點續傳，自動重試會從第 0 幀重來。**
+
+2026-09-17 的實際帳單：同一支片被回收了 7 次，燒掉 10.7 小時的容器時間
+（$9.4），其中 8.6 小時（$7.6）是重跑白費的，最後靠第 8 次賭贏才跑完。
+
+切段之後，被搶佔只賠掉那一段：
+
+| | 容器時間 | 費用 |
+|---|---|---|
+| 單一 16 核容器（被搶佔 7 次） | 10.7 h | $9.4 |
+| 切 7 段 × 8 核 | 約 30.8 core-hours | **約 $1.9** |
+| 被搶佔一次的代價 | 單段約 33 min × 8 核 | **約 $0.24**（原本 $1.8+） |
+
+牆鐘時間也從 2 小時降到約 35 分鐘。
+
+### 3.2 流程
+
+```
+run_job          driver，cpu=0.25，nonpreemptible=True，整趟約 $0.03
+  ├─► split      -c copy 依來源關鍵影格切段（零損失，不重新編碼）
+  ├─► encode_chunk.map()   每段一個容器，可搶佔，retries=2
+  └─► merge      concat 各段，再把原片的音軌/字幕 mux 回去
+```
+
+**只有 driver 買「不被搶佔」的保險。** 它只要 0.25 核，但它一死整個 job 的
+進度就斷了。真正花錢的編碼工作留在便宜的可搶佔池裡 —— 反過來做（整個
+16 核編碼設 nonpreemptible）要 3 倍費率，全片約 $5.5。
+
+音軌完全不進切段流程，`merge` 時才從原片整條 mux 回去，
+避免逐段複製音訊累積出同步漂移。
+
+### 3.3 進度回報
+
+用 `modal.Dict`（名稱 `av1-jobs`）。key 的配置刻意做到**每個 key 只有一個
+writer**，完全避開 read-modify-write 競態：
+
+| key | writer |
+|---|---|
+| `jobs:index` | 本機 |
+| `job:{id}:submit` | 本機（含 driver 的 call id） |
+| `job:{id}` | 雲端 driver（狀態機） |
+| `job:{id}:chunk:{i}` | 該段自己的容器（進度） |
+| `job:{id}:cancelled` | 本機 |
+
+driver 存活與否不用 heartbeat 判斷（它阻塞在 `.map()` 時沒辦法更新任何
+東西），改查 `FunctionCall.get(timeout=0)`，那才是權威來源。
+
+### 3.4 參數
+
+| 參數 | 預設 | 說明 |
+|---|---|---|
+| preset | 3 | 越小越慢、同畫質下越小 |
+| crf | 34 | 越小畫質越好、檔案越大 |
+| gop | 600 | 關鍵影格間隔；60fps 用 600，24/30fps 用 240/300 |
+| 每段秒數 `--chunk` | 600 | 調大＝交界少，調小＝被搶佔時賠得少 |
+| 每段核心 `--cpu` | 8 | **不是 16**：SVT-AV1 超過 8 核執行緒效率下降，小容器也更好排 |
+| svt | `BASE_SVT` | 覆寫 `-svtav1-params` |
+| `--test` | 關 | **真的只轉一小段**（見下） |
+| `--start` / `--dur` | 00:05:00 / 20 | 測試片段的起點與長度 |
+| `--tag` | 無 | 輸出加註記，同一支片跑不同參數才不會互相覆蓋 |
+
+**`--test` 的歷史地雷**：舊版的 `--test` 只改輸出檔名、完全沒切片段，
+所以每次「測試」其實都在轉 62 分鐘全片。現在 `-ss` 放在 `-i` 之前做精確
+seek，真的只轉 `--dur` 秒。測試片段一律不含音軌 —— `-c:a copy` 沒辦法在
+音訊封包中間切斷，會把容器長度撐長（實測要 20 秒卻得到 21.06 秒），
+對不齊 ref 就沒辦法打 VMAF。
+
+---
+
+## 4. 標準流程
+
+### 4.1 啟動控制台
+
+```bat
+start-web.bat
+```
+
+開 <http://127.0.0.1:8765>。上傳、送件、看進度、下載、清理都在這一頁。
+
+**送出之後就可以關掉網頁、關掉 server、關機。** 工作在雲端 driver 手上跑，
+本機完全不需要保持連線。回來再開一次就看得到進度。
+
+只綁 127.0.0.1 擋不住惡意網站對 localhost 發請求，所以所有會改變狀態的
+請求都會檢查 `Origin`，非同源直接 403。
+
+### 4.2 上傳原片
+
+把檔案拖進網頁上方的區塊。進度分兩段顯示：瀏覽器 → 本機 server，
+然後本機 server → Modal Volume。實測約 3 MB/s，3.5 GB 大約 20 分鐘。
+
+也可以走 CLI：
+
+```bat
+modal volume put videos "C:\path\to\movie.mp4" in/movie.mp4
+```
+
+### 4.3 跑測試組選參數
+
+先切一段無損 ref 當基準（**不要各自用 `-ss` 切片比對，幀會錯位**）：
+
+```bat
+ffmpeg -ss 00:05:00 -t 20 -i "C:\path\to\movie.mp4" -an -c:v libx264 -qp 0 -preset fast -pix_fmt yuv420p ref_movie.mkv
+```
+
+把 ref 傳上去，然後在網頁上勾「只轉測試片段」，用不同 crf 各送一次
+（記得給不同的 tag）。下載後：
+
+```bat
+python vmaf.py ref_movie.mkv
+```
+
+標準：**平均 ≥ 95、最低 ≥ 88–90**，其中選體積最小的。
+VMAF 對色帶和暗部細節不敏感，最後仍要用播放器看一下暗部與膚色漸層。
+
+### 4.4 轉全片
+
+在網頁上選來源、設好參數、按送出。或走 CLI：
+
+```bat
+python submit.py movie.mp4 --preset 3 --crf 34
+```
+
+- 只有改到 `encode.py` 才需要重新 `modal deploy encode.py`；只換參數直接送。
+- 網頁上每一段都有獨立的進度條，**哪一段被搶佔重跑會直接看出來**（進度歸零）。
+- 要中止：網頁上按取消。實測 7 個容器在 50 秒內全部終止。
+- 萬一狀態卡住：網頁右上角有「強制停止整個 App」。
+
+### 4.5 完成檢查
+
+`merge` 會自動比對時長並把結果寫進 job：
+
+- **硬檢查**：輸出時長必須等於各段總和。不成立＝漏段或順序錯亂。
+- **軟提示**：輸出與來源時長不同時會說明原因。最常見的是來源帶了
+  edit list（起始裁切），`-c copy` 切段會把被隱藏的前置幀一起帶出來 ——
+  這不是管線的錯。用 `-ss ... -c copy` 切出來的檔案就會有這個性質。
+
+### 4.6 Windows 主控台編碼
+
+Windows 中文版預設 cp950（Big5），modal 印進度符號 `✓` 時會直接炸掉：
+
+```
+'cp950' codec can't encode character '\u2713' in position 0: illegal multibyte sequence
+```
+
+每個視窗先設一次，或直接加進系統環境變數（`start-web.bat` 已經設好）：
+
+```bat
+set PYTHONIOENCODING=utf-8
+```
+
+### 4.7 下載與清理
+
+網頁下方可以直接下載成品、刪除 Volume 上的檔案。CLI 版：
+
+```bat
+modal volume get videos out/movie_AV1.mkv D:\Videos\
+python cleanup.py "*_test_*" -y
+```
+
+## 5. 實測結果（1080p59.94、H.264 Baseline 約 7.9 Mbps、62 分鐘）
+
+20 秒 ref，16 核，`BASE_SVT`（film-grain=0、無 variance boost），gop 600：
+
+| 參數 | 大小 | VMAF 平均 | 調和 | 最低 |
+|---|---|---|---|---|
+| p3 crf28 | 11.3 MiB | 97.51 | 97.47 | 92.23 |
+| p3 crf30 | 10.0 MiB | 96.96 | 96.92 | 91.60 |
+| p3 crf32 | 8.5 MiB | 96.09 | 96.05 | 90.95 |
+| **p3 crf34** | **7.4 MiB** | **95.25** | **95.20** | **89.79** |
+| p3 crf36 | 6.4 MiB | 94.23 | 94.18 | 88.99 |
+| p3 vb1（crf30 + variance boost 1） | 16.2 MiB | 98.23 | 98.21 | 92.09 |
+| p4 crf30 | 10.0 MiB | 96.60 | 96.55 | 91.18 |
+| p4 crf34 | 7.4 MiB | 94.90 | 94.85 | 89.91 |
+
+### 結論
+
+- **採用：preset 3、crf 34**。全片約 1.45 GB，約原片（3.6 GB）的 40%。
+- **省額度替代：preset 4、crf 34**。體積相同、分數差距在誤差內。
+- **variance boost**：體積 +62%，分數僅 +1.3，不划算。
+- p3 與 p4 同 CRF 下體積幾乎相同，preset 對此片源影響很小。
+- 主觀覺得「糊」主要來自原片本身（H.264 Baseline），而非 AV1 編碼。
+
+### 切段會不會影響畫質（2026-09-17 實測）
+
+同一支 20 秒無損 ref，p3 crf34，一次單段、一次切成 3 段（每段 7 秒），
+兩者都對同一個 ref 打分：
+
+| 版本 | 大小 | VMAF 平均 | 調和 | 最低 |
+|---|---|---|---|---|
+| 單段 | 7.422 MiB | 95.2522 | 95.2021 | 89.7910 |
+| 切 3 段 | 7.442 MiB | 95.2338 | 95.1840 | 90.2431 |
+
+**平均差 0.018 分（0.02%），體積 +0.27%，最低分反而高了 0.45。**
+
+而且這是嚴苛版的測試：20 秒內有 2 個交界，實際用 10 分鐘一段時，
+每分鐘的交界數少約 85 倍。
+
+為什麼影響這麼小：
+
+- **CRF 是逐幀的量化目標，不是全片的位元率分配。** 同一段畫面在 10 分鐘的
+  段落裡和在 62 分鐘的整片裡，量化決策一樣。**如果用的是 2-pass 或指定總
+  位元率，切段就會真的改變畫質分配 —— 但我們不是。**
+- 每段開頭多一個關鍵影格，但 `-g 600` 本來就是每 10 秒一個，多一個可以忽略。
+- 每段開頭的 lookahead 沒有前文，前一兩個 GOP 的碼率決策略有不同。
+- 切段本身零損失：`-c copy` 依來源關鍵影格切，解出來的幀與原片逐位元相同。
+
+順帶一提，上面單段那一列跟本節第一張表的 p3 crf34（7.4 MiB / 95.25 /
+95.20 / 89.79）四位小數吻合，代表切段重構沒有動到編碼行為本身。
+
+### 時間與花費
+
+| 做法 | 全片時間 | 花費 |
+|---|---|---|
+| 單一 16 核容器，p4 | 約 1.8 小時 | 約 1.6 美元 |
+| 單一 16 核容器，p3 | 約 3 小時 | 約 2.7 美元 |
+| **單一 16 核容器，p3，被搶佔 7 次（實際發生過）** | **10.7 小時** | **9.4 美元** |
+| 切 7 段 × 8 核，p3 | 牆鐘約 35 分鐘 | **約 1.9 美元** |
+
+切段前每部片是 1.6–2.7 美元「但可能變成 9 美元」；切段後穩定在 2 美元左右，
+每月額度大約可轉 15 部。
+
+---
+
+## 6. 參數備忘
+
+- **10-bit（`yuv420p10le`）**：幾乎不增加體積，減少色帶。
+- **`tune=0`**：主觀畫質（VQ）導向；`tune=2` 為 SSIM 導向。
+- **`film-grain`**：
+  - 乾淨的數位片源（手機、網路、數位攝影）：`0`。
+  - 有底片顆粒的電影：試 `8`–`12`，並比較有無的差別。
+  - 在乾淨片源開啟只會白白增加雜訊與體積。
+- **`-g`**：約 10 秒一個關鍵影格。60fps → 600，30fps → 300，24fps → 240。
+- **`sharpness=1`**：輕微提升邊緣，會增加體積。
+- **一次只改一個變數**，否則無法判斷是哪個參數造成的差異。
+- 來源類似的片可沿用同一組參數；來源差很多時再跑一次 ref 流程。
+
+---
+
+## 7. 計費與注意事項
+
+- **不會持續計費**：只有函式執行期間按秒計費，轉完容器自動關閉。
+- **Volume 儲存**：每月 1 TiB 免費，放幾部片不會產生費用。
+- 檢查是否有殘留任務：
+
+  ```bat
+  modal app list
+  modal app stop av1-encode
+  ```
+
+- **不要刪除執行中任務的輸入檔**，否則該次轉檔會失敗，費用照算。
+- **刪除無法復原**，正式輸出確認下載且可播放後再刪。
+- 同時送多部片，每部都佔滿一組容器，額度消耗會加快。
+- 使用任何雲端平台前，確認上傳內容符合該平台的使用條款。
+
+### 搶佔是主要的花錢原因
+
+預設費率（$0.0000131/core/s）買的是**可搶佔**實例，隨時可能被回收。
+被回收時 Modal 會自動重試，而且**這條路徑跟你設的 `retries` 無關** ——
+modal client 的原始碼寫得很清楚：
+
+> `# This will retry when the server returns GENERIC_STATUS_INTERNAL_FAILURE, i.e. lost inputs or worker preemption`
+
+容器跑得越久、要的核心越多，被回收的機率越高。這就是為什麼要切段。
+
+Dashboard → Apps → av1-encode → Containers 分頁可以直接看到：
+**狀態 `Terminated` 且帶 1 error、下一個容器在幾秒後自動接上，就是被搶佔了。**
+
+### 成本速查
+
+16 核 + 16 GiB = 16 × 0.0000131 + 16 × 0.00000222 = 每秒 $0.000245，即 **$0.88/小時**。
+`nonpreemptible=True` 是 3 倍費率，只值得用在 driver 那種 0.25 核的小容器上。
+
+---
+
+## 8. 疑難排解
+
+| 狀況 | 原因 / 解法 |
+|---|---|
+| `Volume 'videos' not found` | 尚未建立，執行 `modal volume create videos` |
+| 找不到 `modal` 指令 | venv 未啟用，或改用 `python -m modal ...` |
+| ffmpeg 輸出整片紅字 | 正常，進度資訊輸出在 stderr，Modal 以紅色顯示 |
+| `Failed to set thread priority` | 容器限制，無影響 |
+| VMAF 只有 30 幾分 | 幀沒對齊。不要各自用 `-ss` 切片比對，改用 ref 流程；並用 `setpts=N/FRAME_RATE/TB` 以幀序號對齊 |
+| 測試檔互相覆蓋 | preset/crf 相同且沒給不同 `--tag` |
+| `volume get` 失敗 | 本機已有同名檔，加 `--force` |
+| 輸出 mp4 失敗 | 音軌格式（DTS、TrueHD、FLAC）不相容，改用 mkv |
+| 網頁上某一段進度突然歸零 | 那段被搶佔了，正在重跑。只賠掉那一段，不用理它 |
+| 網頁顯示「driver 已消失」 | driver 結束了但狀態沒收尾。按取消清乾淨再重送 |
+| 改了 `jobspec.py` 但網頁行為沒變 | server 啟動時就載入了模組，要重啟 `start-web.bat` |
+| 輸出比來源長 | 來源帶 edit list（起始裁切）。見 4.5，不是合併出錯 |
+| 送件後網頁沒反應 | 先看 `modal app list`，工作在雲端跑，與網頁無關 |
+
+---
+
+## 附錄：本機批次轉檔（R5 3600）
+
+拖曳多個檔案到 `.bat` 上依序轉檔：
+
+```bat
+@echo off
+chcp 65001 >nul
+:loop
+if "%~1"=="" goto end
+echo 正在轉檔：%~nx1
+start /b /belownormal /wait ffmpeg -hide_banner -i "%~1" -map 0 ^
+  -c:v libsvtav1 -preset 5 -crf 34 -g 600 -pix_fmt yuv420p10le ^
+  -svtav1-params tune=0:enable-overlays=1:enable-qm=1:film-grain=0 ^
+  -c:a copy -c:s copy "%~dp1%~n1_AV1.mkv"
+shift
+goto loop
+:end
+pause
+```
+
+- 本機 R5 3600 以 preset 4 轉 1080p60 約 0.17x，1 小時的片需 6 小時以上。
+- `/belownormal` 降低優先權，轉檔時仍可正常使用電腦。
