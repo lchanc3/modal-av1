@@ -101,8 +101,10 @@
   td:last-child { padding-right: 0; }
   tr:last-child td { border-bottom: none; }
   td.num { text-align: right; color: var(--dim); font-family: var(--mono); font-size: 13px;
-           white-space: nowrap; }
-  td.act { text-align: right; white-space: nowrap; width: 1%; padding-left: 20px; }
+           white-space: nowrap; width: 110px; }
+  /* 固定寬度，讓成品與原片兩張表的體積欄對得齊 —— 成品多一顆「下載」，
+     不固定的話兩邊的數字會落在不同位置 */
+  td.act { text-align: right; white-space: nowrap; width: 126px; padding-left: 20px; }
   td.act > * + * { margin-left: 8px; }
 
   .days { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin-top: 16px; }
@@ -432,24 +434,27 @@ function toast(msg, bad = false) {
   toastTimer = setTimeout(() => el.classList.remove("show"), bad ? 6000 : 3000);
 }
 
-// 兩段式確認：第一次點變成「確定？」，四秒內再點一次才真的執行
+const ICON_CHECK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg>';
+
+// 兩段式確認：第一次點轉紅，四秒內再點一次才真的執行。
+// 圖示按鈕換成同尺寸的打勾、文字按鈕鎖住原寬度 —— 否則版面會整排跳動。
 function armConfirm(btn, action) {
-  if (btn._armed) {
+  const restore = () => {
     clearTimeout(btn._armed);
     btn._armed = null;
     btn.innerHTML = btn._html;
+    btn.style.minWidth = "";
     btn.classList.remove("arm");
-    action();
-    return;
-  }
+    btn.removeAttribute("title");
+  };
+  if (btn._armed) { restore(); action(); return; }
+
   btn._html = btn.innerHTML;
-  btn.innerHTML = "確定？";
+  btn.style.minWidth = btn.offsetWidth + "px";
+  btn.innerHTML = btn.classList.contains("icon") ? ICON_CHECK : "確定";
   btn.classList.add("arm");
-  btn._armed = setTimeout(() => {
-    btn._armed = null;
-    btn.innerHTML = btn._html;
-    btn.classList.remove("arm");
-  }, 4000);
+  btn.title = "再按一次確認";
+  btn._armed = setTimeout(restore, 4000);
 }
 
 async function send(url, opts, okMsg) {
