@@ -404,26 +404,39 @@ class _Counting:
         return getattr(self._fp, n)
 
 
-def _to_modal(tmp_path, remote, uid, size):
+def _to_modal(src_path, remote, uid, size, cleanup=True):
+    """把本機檔案推到 Volume。cleanup=False 時不刪來源（路徑模式用的是原檔）。"""
     UPLOADS[uid].update(phase="modal", sent=0, total=size)
     try:
-        with open(tmp_path, "rb") as fp:
+        with open(src_path, "rb") as fp:
             with vol().batch_upload(force=True) as batch:
                 batch.put_file(_Counting(fp, uid), remote)
         UPLOADS[uid].update(phase="done", sent=size, ended=time.time())
     except Exception as e:
         UPLOADS[uid].update(phase="error", error=repr(e), ended=time.time())
     finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+        if cleanup:
+            try:
+                os.remove(src_path)
+            except OSError:
+                pass
+
+
+def _check_name(name: str) -> str:
+    if not name or "/" in name or "\\" in name:
+        raise HTTPException(400, "檔名不合法")
+    return name
 
 
 @app.put("/api/upload")
 async def upload(request: Request, name: str, uid: str = ""):
-    if "/" in name or "\\" in name:
-        raise HTTPException(400, "檔名不合法")
+    """拖曳上傳：body 先落到本機暫存檔，再推到 Volume。
+
+    需要暫存檔是因為 Modal 的上傳器要求「可 seek」的物件（它會 seek 到結尾
+    量大小，並以 multipart 平行讀取各區間），而請求串流不可 seek。
+    檔案已經在這台機器上的話，用 /api/upload/local 可以完全省掉這次複製。
+    """
+    _check_name(name)
     uid = uid or uuid.uuid4().hex[:8]
     total = int(request.headers.get("content-length") or 0)
     UPLOADS[uid] = {"phase": "local", "sent": 0, "total": total, "name": name, "error": ""}
@@ -436,11 +449,33 @@ async def upload(request: Request, name: str, uid: str = ""):
             written += len(chunk)
             UPLOADS[uid]["sent"] = written
 
-    await run_in_threadpool(_to_modal, tmp_path, "in/" + name, uid, written or total)
-    u = UPLOADS.get(uid, {})
-    if u.get("phase") == "error":
-        raise HTTPException(500, u.get("error", "上傳失敗"))
+    # 收完 body 就回應，不等它傳到 Modal（那段可能要十幾分鐘）。
+    # 進度改由 /api/uploads 追蹤，關掉分頁也不會中斷。
+    threading.Thread(target=_to_modal, args=(tmp_path, "in/" + name, uid, written or total),
+                     daemon=True).start()
     return {"ok": True, "uid": uid, "path": "in/" + name}
+
+
+@app.post("/api/upload/local")
+async def upload_local(request: Request):
+    """檔案已經在這台機器上：直接把原檔交給 Modal，不複製到暫存。
+
+    3.5 GB 的片子因此省掉一次同樣大小的磁碟寫入。只綁 127.0.0.1 且改狀態的
+    請求會檢查 Origin，所以惡意網頁碰不到這個端點。
+    """
+    body = await request.json()
+    src = os.path.abspath(str(body.get("path") or "").strip().strip('"'))
+    if not os.path.isfile(src):
+        raise HTTPException(400, "找不到檔案：{}".format(src))
+
+    name = _check_name(str(body.get("name") or os.path.basename(src)))
+    uid = uuid.uuid4().hex[:8]
+    size = os.path.getsize(src)
+    UPLOADS[uid] = {"phase": "modal", "sent": 0, "total": size, "name": name, "error": ""}
+
+    threading.Thread(target=_to_modal, args=(src, "in/" + name, uid, size),
+                     kwargs={"cleanup": False}, daemon=True).start()
+    return {"ok": True, "uid": uid, "path": "in/" + name, "size": size}
 
 
 @app.get("/api/upload/{uid}")
