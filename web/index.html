@@ -106,11 +106,15 @@
   td:last-child { padding-right: 0; }
   tr:last-child td { border-bottom: none; }
   td.num { text-align: right; color: var(--dim); font-family: var(--mono); font-size: 13px;
-           white-space: nowrap; width: 110px; }
-  /* 固定寬度，讓成品與原片兩張表的體積欄對得齊 —— 成品多一顆「下載」，
-     不固定的話兩邊的數字會落在不同位置 */
-  td.act { text-align: right; white-space: nowrap; width: 126px; padding-left: 20px; }
+           white-space: nowrap; }
+  td.act { text-align: right; white-space: nowrap; padding-left: 20px; }
   td.act > * + * { margin-left: 8px; }
+  td.k { white-space: nowrap; }
+
+  /* 固定寬度只給檔案表格：成品多一顆「下載」，不固定的話兩張表的體積欄會
+     落在不同位置。掃描表有六個 .num 欄位，套上去會把第一欄擠到折行。 */
+  table.files td.num { width: 110px; }
+  table.files td.act { width: 126px; }
 
   .days { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin-top: 16px; }
   .days > div { flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
@@ -848,7 +852,7 @@ function sweepTable(j) {
     const pass = r.vmaf_mean >= j.min_mean && r.vmaf_min >= j.min_low;
     const best = r.crf === j.pick;
     return `<tr style="${best ? "background:#F3EDE4" : ""}">
-      <td class="mono" style="${best ? "font-weight:700;color:var(--accent)" : ""}">crf ${r.crf}${best ? "　← 建議" : ""}</td>
+      <td class="mono k" style="${best ? "font-weight:700;color:var(--accent)" : ""}">crf ${r.crf}${best ? "　← 建議" : ""}</td>
       <td class="num">${mib(r.size)}</td>
       <td class="num" style="color:${pass ? "var(--ok)" : "var(--err)"}">${r.vmaf_mean.toFixed(2)}</td>
       <td class="num">${r.vmaf_harmonic.toFixed(2)}</td>
@@ -919,14 +923,14 @@ async function loadFiles() {
 
   $("outTotal").textContent = f.out.length ? mib(f.out.reduce((s, x) => s + x.size, 0)) : "";
   // 路徑放 data-path 而不是塞進 onclick 的字串裡：檔名含單引號會把字串撐破
-  paint($("out"), f.out.length ? `<table><tbody>${f.out.map(x => `
+  paint($("out"), f.out.length ? `<table class="files"><tbody>${f.out.map(x => `
     <tr><td>${esc(x.name)}</td><td class="num">${mib(x.size)}</td><td class="act">
       <a class="btn" href="/api/download?path=${encodeURIComponent(x.path)}">下載</a>
       <button type="button" class="icon rm" data-path="${esc(x.path)}" aria-label="刪除 ${esc(x.name)}">${ICON_TRASH}</button>
     </td></tr>`).join("")}</tbody></table>`
     : '<p class="muted" style="margin:0">還沒有成品。</p>');
 
-  paint($("in"), f.in.length ? `<table><tbody>${f.in.map(x => `
+  paint($("in"), f.in.length ? `<table class="files"><tbody>${f.in.map(x => `
     <tr><td>${esc(x.name)}</td><td class="num">${mib(x.size)}</td><td class="act">
       <button type="button" class="icon rm" data-path="${esc(x.path)}" aria-label="刪除 ${esc(x.name)}">${ICON_TRASH}</button>
     </td></tr>`).join("")}</tbody></table>`
