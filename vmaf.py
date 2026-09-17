@@ -1,6 +1,6 @@
 import glob, json, os, re, subprocess, sys
 
-ref = sys.argv[1] if len(sys.argv) > 1 else "ref_e992.mkv"
+ref = sys.argv[1] if len(sys.argv) > 1 else "ref.mkv"
 folder = sys.argv[2] if len(sys.argv) > 2 else "out"
 stem = os.path.splitext(os.path.basename(ref))[0]
 F = "settb=AVTB,setpts=N/FRAME_RATE/TB,format=yuv420p10le"
