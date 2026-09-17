@@ -4,151 +4,279 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>modal-av1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
   :root {
-    --bg: #14161a; --panel: #1c1f25; --line: #2b3038; --fg: #e6e8eb;
-    --dim: #949aa4; --accent: #5aa9e6; --ok: #4cc38a; --warn: #e8b339; --err: #e5634d;
+    --bg: #F5F2EC;
+    --card: #FFFFFF;
+    --line: #E4DFD4;
+    --line-soft: #EFEAE0;
+    --field: #D9D2C4;
+    --fg: #1C1A16;
+    --dim: #6B6558;
+    --accent: #9A5B2E;
+    --accent-hi: #7A4522;
+    --ok: #2F7D5B;
+    --err: #B03A2E;
+    --sans: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+    --serif: "Noto Serif TC", Georgia, serif;
+    --mono: "IBM Plex Mono", Consolas, monospace;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
-         font: 14px/1.6 "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif; }
-  .wrap { max-width: 1040px; margin: 0 auto; display: grid; gap: 20px; }
-  h1 { font-size: 18px; margin: 0; font-weight: 600; }
-  h1 small { color: var(--dim); font-weight: 400; font-size: 13px; margin-left: 10px; }
-  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
-  h2 { font-size: 14px; margin: 0 0 14px; font-weight: 600; color: var(--dim);
-       text-transform: uppercase; letter-spacing: .06em; }
-  label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
-  input, select, button { font: inherit; }
-  input, select { background: #121418; color: var(--fg); border: 1px solid var(--line);
-                  border-radius: 6px; padding: 7px 9px; width: 100%; }
+  body { margin: 0; padding: 32px 36px; background: var(--bg); color: var(--fg);
+         font: 14px/1.6 var(--sans); }
+  .wrap { max-width: 1280px; margin: 0 auto; }
+
+  header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+           margin-bottom: 24px; }
+  h1 { font-family: var(--serif); font-size: 28px; font-weight: 600; margin: 0;
+       letter-spacing: -0.01em; }
+  header p { margin: 4px 0 0; font-size: 13px; color: var(--dim); }
+
+  .cols { display: flex; gap: 24px; align-items: flex-start; }
+  aside { width: 396px; flex-shrink: 0; display: flex; flex-direction: column; gap: 16px;
+          position: sticky; top: 32px; }
+  main { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .card.active { border-left: 3px solid var(--accent); }
+  .cap { font-size: 11px; font-weight: 500; letter-spacing: 0.08em; color: var(--dim); }
+
+  label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 6px; }
+  input, select { width: 100%; background: var(--card); color: var(--fg);
+                  border: 1px solid var(--field); border-radius: 7px; padding: 9px 10px;
+                  font: 14px var(--sans); }
+  input.mono { font-family: var(--mono); }
   input:focus, select:focus { outline: none; border-color: var(--accent); }
-  button { background: #2a2f38; color: var(--fg); border: 1px solid var(--line);
-           border-radius: 6px; padding: 7px 14px; cursor: pointer; }
-  button:hover { border-color: var(--accent); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #08121a; font-weight: 600; }
-  button.danger:hover { border-color: var(--err); color: var(--err); }
+  input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; }
+
+  button, .btn { font: 13px var(--sans); background: transparent; color: var(--dim);
+                 border: 1px solid var(--field); border-radius: 7px; padding: 7px 14px;
+                 cursor: pointer; text-decoration: none; display: inline-block; }
+  button:hover, .btn:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff;
+                   font-weight: 700; font-size: 14px; padding: 11px 26px; }
+  button.primary:hover { background: var(--accent-hi); color: #fff; }
+  button.icon { padding: 6px 9px; line-height: 0; }
   button:disabled { opacity: .45; cursor: not-allowed; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+
+  .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .row { display: flex; align-items: center; gap: 10px; }
   .spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 26px; text-align: center;
-          color: var(--dim); cursor: pointer; transition: .15s; }
-  .drop.hot { border-color: var(--accent); color: var(--accent); background: #1a2028; }
-  .bar { height: 6px; background: #121418; border-radius: 3px; overflow: hidden; }
-  .bar > i { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+
+  .drop { border: 1.5px dashed var(--field); border-radius: 10px; padding: 26px 16px;
+          text-align: center; color: var(--dim); cursor: pointer; transition: .15s; }
+  .drop:hover, .drop.hot { border-color: var(--accent); color: var(--accent); }
+
+  .bar { height: 8px; background: var(--line-soft); border-radius: 4px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); transition: width .5s; }
   .bar.ok > i { background: var(--ok); }
   .bar.err > i { background: var(--err); }
-  .job { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 10px; }
-  .chunks { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-            gap: 8px; margin-top: 12px; }
-  .chunk { font-size: 11px; color: var(--dim); }
-  .chunk .bar { margin-top: 3px; }
-  .tag { font-size: 11px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); }
-  .tag.run { color: var(--accent); border-color: var(--accent); }
-  .tag.done { color: var(--ok); border-color: var(--ok); }
-  .tag.err { color: var(--err); border-color: var(--err); }
-  .tag.idle { color: var(--dim); }
+
+  .chunks { display: grid; gap: 10px; margin-top: 18px;
+            grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); }
+  .chunk .bar { height: 4px; margin-top: 5px; }
+  .chunk .lbl { font-size: 11px; color: var(--dim); font-family: var(--mono);
+                display: flex; justify-content: space-between; }
+
+  .pill { font-size: 11px; border-radius: 99px; padding: 2px 10px; border: 1px solid; }
+  .pill.run { color: var(--accent); border-color: #C9A98C; }
+  .pill.done { color: var(--ok); border-color: #A8C9B8; }
+  .pill.err { color: var(--err); border-color: #D9A69F; }
+  .pill.idle { color: var(--dim); border-color: var(--field); }
+
   table { width: 100%; border-collapse: collapse; }
-  td { padding: 7px 4px; border-bottom: 1px solid var(--line); }
-  td.num { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
+  td { padding: 11px 0; border-bottom: 1px solid var(--line-soft); }
+  tr:last-child td { border-bottom: none; }
+  td.num { text-align: right; color: var(--dim); font-family: var(--mono); font-size: 13px;
+           white-space: nowrap; }
+  td.act { text-align: right; white-space: nowrap; width: 1%; }
+
+  .days { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin-top: 16px; }
+  .days > div { flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
+                height: 100%; }
+  .days i { display: block; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px;
+            opacity: .75; }
+  .days i.big { opacity: 1; }
+
+  .mono { font-family: var(--mono); }
   .muted { color: var(--dim); font-size: 12px; }
-  .warn { color: var(--warn); font-size: 12px; }
+  .warn { color: #8A6A1F; font-size: 12px; }
   .err { color: var(--err); font-size: 12px; word-break: break-all; }
   .hide { display: none; }
+
+  details.history > summary { list-style: none; cursor: pointer; padding: 13px 18px;
+      border: 1px solid var(--line); border-radius: 10px; color: var(--dim); font-size: 13px;
+      display: flex; align-items: center; justify-content: space-between; }
+  details.history > summary::-webkit-details-marker { display: none; }
+  details.history > summary:hover { border-color: var(--accent); color: var(--accent); }
+  details.history[open] > summary { border-radius: 10px 10px 0 0; border-bottom: none; }
+  details.history .body { border: 1px solid var(--line); border-top: 1px solid var(--line-soft);
+      border-radius: 0 0 10px 10px; background: var(--card); padding: 4px 18px; }
+  details.history svg { transition: transform .2s; }
+  details.history[open] summary svg { transform: rotate(180deg); }
+
+  @media (max-width: 1080px) {
+    body { padding: 20px 16px; }
+    .cols { flex-direction: column; }
+    aside { width: 100%; position: static; }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-  <div class="spread">
-    <h1>modal-av1 <small>切段並行轉檔 · 送件後可關掉本頁</small></h1>
-    <button class="danger" onclick="stopApp()">強制停止整個 App</button>
-  </div>
-
-  <section>
-    <h2>上傳原片</h2>
-    <div class="drop" id="drop">把影片拖進來，或點這裡選檔</div>
-    <input type="file" id="file" class="hide">
-    <div id="up" class="hide" style="margin-top:12px">
-      <div class="spread"><span class="muted" id="upLabel"></span><span class="muted mono" id="upPct"></span></div>
-      <div class="bar" style="margin-top:6px"><i id="upBar" style="width:0"></i></div>
+  <header>
+    <div>
+      <h1>modal&#8209;av1</h1>
+      <p>切段並行轉檔　·　送出後可關掉本頁</p>
     </div>
-  </section>
+    <button type="button" onclick="stopApp()">強制停止整個 App</button>
+  </header>
 
-  <section>
-    <h2>送件</h2>
-    <div class="grid">
-      <div style="grid-column: span 2">
-        <label>來源（Volume in/）</label>
-        <select id="name"></select>
+  <div class="cols">
+    <aside>
+
+      <div class="card">
+        <div class="cap" style="margin-bottom:14px">上傳原片</div>
+        <div class="drop" id="drop">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+          <div style="font-size:13px;margin-top:8px">把影片拖進來，或點這裡選檔</div>
+        </div>
+        <input type="file" id="file" class="hide">
+        <div id="up" class="hide" style="margin-top:14px">
+          <div class="spread"><span class="muted" id="upLabel"></span><span class="muted mono" id="upPct"></span></div>
+          <div class="bar" style="margin-top:6px"><i id="upBar" style="width:0"></i></div>
+        </div>
       </div>
-      <div><label>preset</label><input id="preset" type="number" value="3" min="0" max="13"></div>
-      <div><label>crf</label><input id="crf" type="number" value="34" min="1" max="63"></div>
-      <div><label>gop</label><input id="gop" type="number" value="600"></div>
-      <div><label>每段秒數</label><input id="chunk_sec" type="number" value="600"></div>
-      <div><label>每段核心</label><input id="cpu" type="number" value="8" min="1" max="32"></div>
-    </div>
-    <div style="margin-top:12px">
-      <label>svtav1-params</label>
-      <input id="svt" class="mono" value="tune=0:enable-overlays=1:enable-qm=1:film-grain=0">
-    </div>
-    <div class="row" style="margin-top:14px">
-      <label class="row" style="margin:0"><input type="checkbox" id="test" style="width:auto"> <span>只轉測試片段</span></label>
-      <span id="testOpts" class="row hide">
-        <label style="margin:0">起點</label><input id="start" value="00:05:00" style="width:100px">
-        <label style="margin:0">長度(秒)</label><input id="dur" type="number" value="20" style="width:80px">
-        <label style="margin:0">tag</label><input id="tag" placeholder="自動" style="width:120px">
-      </span>
-    </div>
-    <div class="spread" style="margin-top:16px">
-      <span class="muted" id="estimate"></span>
-      <button class="primary" id="go" onclick="submitJob()">送出</button>
-    </div>
-  </section>
 
-  <section>
-    <h2>工作</h2>
-    <div id="jobs"><p class="muted">還沒有工作。</p></div>
-  </section>
+      <div class="card">
+        <div class="cap" style="margin-bottom:14px">送件</div>
 
-  <section>
-    <h2>成品（Volume out/）</h2>
-    <div id="out"></div>
-  </section>
+        <div style="margin-bottom:14px">
+          <label for="name">來源</label>
+          <select id="name"></select>
+        </div>
 
-  <section>
-    <h2>原片（Volume in/）</h2>
-    <div id="in"></div>
-  </section>
+        <div class="grid2" style="margin-bottom:14px">
+          <div><label for="preset">preset</label><input class="mono" id="preset" type="number" value="3" min="0" max="13"></div>
+          <div><label for="crf">crf</label><input class="mono" id="crf" type="number" value="34" min="1" max="63"></div>
+          <div><label for="gop">gop</label><input class="mono" id="gop" type="number" value="600"></div>
+          <div><label for="chunk_sec">每段秒數</label><input class="mono" id="chunk_sec" type="number" value="600"></div>
+        </div>
 
+        <div style="margin-bottom:14px">
+          <label for="cpu">每段核心</label><input class="mono" id="cpu" type="number" value="8" min="1" max="32">
+        </div>
+
+        <div style="margin-bottom:14px">
+          <label for="svt">svtav1-params</label>
+          <input class="mono" id="svt" style="font-size:12px" value="tune=0:enable-overlays=1:enable-qm=1:film-grain=0">
+        </div>
+
+        <div class="row" style="margin-bottom:6px">
+          <input type="checkbox" id="test"><label for="test" style="margin:0;color:var(--fg);font-size:13px">只轉測試片段</label>
+        </div>
+        <div id="testOpts" class="hide grid2" style="margin-bottom:14px">
+          <div><label for="start">起點</label><input class="mono" id="start" value="00:05:00"></div>
+          <div><label for="dur">長度（秒）</label><input class="mono" id="dur" type="number" value="20"></div>
+          <div style="grid-column:span 2"><label for="tag">tag（可留空）</label><input class="mono" id="tag" placeholder="自動"></div>
+        </div>
+
+        <div class="spread" style="border-top:1px solid var(--line-soft);padding-top:14px;margin-top:14px">
+          <div class="muted" id="estimate" style="line-height:1.5"></div>
+          <button type="button" class="primary" id="go" onclick="submitJob()">送出</button>
+        </div>
+      </div>
+    </aside>
+
+    <main>
+      <div class="card" id="budgetCard">
+        <div class="spread" style="margin-bottom:14px">
+          <div class="cap">本月預算</div>
+          <div class="muted mono" id="budgetCycle"></div>
+        </div>
+        <div class="spread" style="align-items:flex-end">
+          <div>
+            <div class="mono" id="budgetLeft" style="font-size:34px;font-weight:500;line-height:1">—</div>
+            <div class="muted" id="budgetUsed" style="margin-top:6px"></div>
+          </div>
+          <div style="text-align:right">
+            <label for="allowance" style="margin-bottom:4px">每月額度（美元）</label>
+            <input class="mono" id="allowance" type="number" step="1" min="1"
+                   style="width:110px;text-align:right" value="30">
+          </div>
+        </div>
+        <div class="bar" style="margin-top:16px"><i id="budgetBar" style="width:0"></i></div>
+        <div id="budgetDays" class="days"></div>
+        <div class="muted" id="budgetBreak" style="margin-top:10px"></div>
+      </div>
+
+      <div id="active"></div>
+
+      <div class="card">
+        <div class="spread" style="margin-bottom:12px">
+          <div class="cap">成品</div>
+          <div class="muted mono" id="outTotal"></div>
+        </div>
+        <div id="out"></div>
+      </div>
+
+      <div class="card">
+        <div class="cap" style="margin-bottom:12px">原片</div>
+        <div id="in"></div>
+      </div>
+
+      <div class="card hide" id="workCard">
+        <div class="spread" style="margin-bottom:10px">
+          <div class="cap">暫存切段</div>
+          <div class="muted mono" id="workTotal"></div>
+        </div>
+        <div class="spread">
+          <p class="muted" style="margin:0" id="workNote"></p>
+          <button type="button" onclick="gcWork()">清理</button>
+        </div>
+      </div>
+
+      <details class="history" id="hist">
+        <summary>
+          <span id="histLabel">歷史</span>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+        </summary>
+        <div class="body" id="histBody"></div>
+      </details>
+    </main>
+  </div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const mib = b => b >= 1073741824 ? (b/1073741824).toFixed(2)+" GiB" : (b/1048576).toFixed(1)+" MiB";
 const hhmmss = s => { s = Math.max(0, Math.round(s));
   return [Math.floor(s/3600), Math.floor(s/60)%60, s%60].map(n => String(n).padStart(2,"0")).join(":"); };
+const TERMINAL = ["done", "error", "cancelled"];
 
-let expanded = new Set();
+const ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></svg>';
+const ICON_RETRY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
 
 // ---- 上傳 ----------------------------------------------------------------
-const drop = $("drop"), filePick = $("file");
-drop.onclick = () => filePick.click();
-filePick.onchange = e => e.target.files[0] && doUpload(e.target.files[0]);
-["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => {
-  e.preventDefault(); drop.classList.add("hot"); }));
-["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => {
-  e.preventDefault(); drop.classList.remove("hot"); }));
-drop.addEventListener("drop", e => {
+$("drop").onclick = () => $("file").click();
+$("file").onchange = e => e.target.files[0] && doUpload(e.target.files[0]);
+["dragenter","dragover"].forEach(ev => $("drop").addEventListener(ev, e => {
+  e.preventDefault(); $("drop").classList.add("hot"); }));
+["dragleave","drop"].forEach(ev => $("drop").addEventListener(ev, e => {
+  e.preventDefault(); $("drop").classList.remove("hot"); }));
+$("drop").addEventListener("drop", e => {
   const f = e.dataTransfer.files[0]; if (f) doUpload(f);
 });
 
 function doUpload(file) {
   const uid = Math.random().toString(16).slice(2, 10);
   $("up").classList.remove("hide");
-  setUp("傳到本機 server…", 0);
+  setUp("① 瀏覽器 → 本機 server", 0);
 
   const xhr = new XMLHttpRequest();
   xhr.open("PUT", `/api/upload?name=${encodeURIComponent(file.name)}&uid=${uid}`);
@@ -158,7 +286,7 @@ function doUpload(file) {
   xhr.upload.onload = () => { setUp("② 本機 server → Modal Volume", 0); pollUp(uid); };
   xhr.onload = () => {
     if (xhr.status === 200) { setUp("上傳完成", 100); loadFiles(); }
-    else { setUp("上傳失敗：" + xhr.responseText, 0); }
+    else setUp("上傳失敗：" + xhr.responseText, 0);
   };
   xhr.onerror = () => setUp("上傳失敗（連線中斷）", 0);
   xhr.send(file);
@@ -180,24 +308,25 @@ async function pollUp(uid) {
 }
 
 // ---- 送件 ----------------------------------------------------------------
-$("test").onchange = e => {
-  $("testOpts").classList.toggle("hide", !e.target.checked);
-  estimate();
-};
+$("test").onchange = e => { $("testOpts").classList.toggle("hide", !e.target.checked); estimate(); };
 ["preset","crf","chunk_sec","cpu","name"].forEach(id => $(id).onchange = estimate);
 
 function estimate() {
-  const src = window._in?.find(f => f.name === $("name").value);
-  if (!src || $("test").checked) { $("estimate").textContent = ""; return; }
+  if ($("test").checked || !$("name").value) { $("estimate").textContent = ""; return; }
   const cpu = +$("cpu").value, chunk = +$("chunk_sec").value;
-  // 16 核 preset 3 實測 0.5x，速度大致隨核心數遞減
-  const speed = 0.5 * (cpu / 16) * 1.35;
-  const dur = 3740;   // 只是給個量級，實際長度以來源為準
-  const n = Math.ceil(dur / chunk);
+  const dur = window._srcDur || 3600;           // 沒有實際長度就以 1 小時估
+  const speed = 0.5 * (cpu / 16) * 1.35;        // 16 核 preset 3 實測 0.5x，核心少時效率略高
+  const n = Math.max(1, Math.ceil(dur / chunk));
   const hrs = (dur / speed) / 3600;
-  const cost = hrs * (cpu * 0.0000131 + (cpu * 1024 / 1024) * 0.00000222) * 3600;
-  $("estimate").textContent =
-    `約 ${n} 段平行、每段約 ${hhmmss(chunk / speed)}，合計約 $${cost.toFixed(2)}（以 62 分鐘片長估）`;
+  const cost = hrs * (cpu * 0.0000131 + cpu * 0.00000222) * 3600;
+  const b = window._budget;
+  const after = b ? b.remaining - cost : null;
+  $("estimate").innerHTML =
+    `${n} 段平行　·　約 ${hhmmss(Math.min(chunk, dur) / speed)}<br>` +
+    `<span style="color:var(--accent);font-weight:500" class="mono">≈ $${cost.toFixed(2)}</span>` +
+    (after === null ? "" :
+      `<span class="mono" style="color:${after < 0 ? "var(--err)" : "var(--dim)"}">` +
+      `　→ 剩 $${after.toFixed(2)}</span>`);
 }
 
 async function submitJob() {
@@ -227,86 +356,178 @@ const STATE = {
   cancelled: ["已取消", "idle"],
 };
 
-async function loadJobs() {
-  const list = await fetch("/api/jobs").then(r => r.json());
-  const box = $("jobs");
-  if (!list.length) { box.innerHTML = '<p class="muted">還沒有工作。</p>'; return; }
-
-  // 清單本身已含整體進度與 stale 標記，只有展開的才需要再抓每段明細
-  const details = await Promise.all(list.map(j =>
-    expanded.has(j.job_id)
-      ? fetch("/api/jobs/" + j.job_id).then(r => r.json()) : Promise.resolve(j)));
-
-  const html = details.map(j => {
-    const [text, cls] = STATE[j.state] || [j.state, "idle"];
-    const running = !["done","error","cancelled"].includes(j.state);
-    const chunks = (j.chunks || []).map(c => `
-      <div class="chunk">
-        <div>#${String(c.idx).padStart(2,"0")} ${c.state === "done" ? "✓" : (c.pct||0).toFixed(0)+"%"}
-          ${c.fps ? `<span class="mono">${c.fps.toFixed(0)}fps</span>` : ""}</div>
-        <div class="bar ${c.state==="done"?"ok":""}"><i style="width:${c.pct||0}%"></i></div>
-      </div>`).join("");
-    return `
-      <div class="job">
-        <div class="spread">
-          <div>
-            <b>${j.name}</b> <span class="tag ${cls}">${text}</span>
-            ${j.stale ? '<span class="tag err">driver 已消失</span>' : ""}
-            <div class="muted mono">${j.job_id} → ${j.out_name}</div>
-          </div>
-          <div class="row">
-            <span class="mono">${j.pct.toFixed(1)}%</span>
-            ${running ? `<button class="danger" onclick="cancelJob('${j.job_id}')">取消</button>` : ""}
-            ${j.total_chunks > 1 ? `<button onclick="toggle('${j.job_id}')">${expanded.has(j.job_id)?"收合":"每段"}</button>` : ""}
-            ${!running ? `<button onclick="forgetJob('${j.job_id}')">移除</button>` : ""}
-          </div>
-        </div>
-        <div class="bar ${j.state==="done"?"ok":j.state==="error"?"err":""} " style="margin-top:10px">
-          <i style="width:${j.pct}%"></i></div>
-        ${j.size ? `<div class="muted" style="margin-top:6px">${mib(j.size)}　來源 ${hhmmss(j.src_duration||0)} → 輸出 ${hhmmss(j.out_duration||0)}</div>` : ""}
-        ${j.warning ? `<div class="warn" style="margin-top:6px">⚠ ${j.warning}</div>` : ""}
-        ${j.error ? `<div class="err" style="margin-top:6px">${j.error}</div>` : ""}
-        ${(expanded.has(j.job_id) && chunks) ? `<div class="chunks">${chunks}</div>` : ""}
-      </div>`;
+function chunkCells(j) {
+  const cs = j.chunks || [];
+  if (cs.length < 2) return "";
+  const cells = cs.map(c => {
+    const done = c.state === "done";
+    const redo = c.state === "encoding" && c.pct < 8 && (j.pct || 0) > 25;
+    const col = done ? "var(--ok)" : redo ? "var(--err)" : "var(--accent)";
+    const txt = done ? "100%" : c.state === "waiting" ? "—" : (c.pct || 0).toFixed(0) + "%";
+    return `<div class="chunk">
+      <div class="lbl"><span>#${String(c.idx).padStart(2,"0")}</span><span style="color:${col}">${txt}</span></div>
+      <div class="bar"><i style="width:${c.pct||0}%;background:${col}"></i></div>
+    </div>`;
   }).join("");
-
-  // 內容沒變就不要動 DOM：工作都結束後仍每 2 秒重寫會閃爍，也會干擾操作
-  if (html !== box._last) { box.innerHTML = html; box._last = html; }
+  const redoing = cs.filter(c => c.state === "encoding" && c.pct < 8 && (j.pct || 0) > 25).length;
+  const note = redoing
+    ? `<div class="row" style="margin-top:14px;font-size:11.5px;color:var(--err)">${ICON_RETRY}
+         <span>有 ${redoing} 段被搶佔，正在重跑（只賠掉那一段）</span></div>`
+    : "";
+  return `<div class="chunks">${cells}</div>${note}`;
 }
 
-function toggle(id) { expanded.has(id) ? expanded.delete(id) : expanded.add(id); loadJobs(); }
+function activeCard(j) {
+  const [text, cls] = STATE[j.state] || [j.state, "idle"];
+  return `<div class="card active">
+    <div class="spread" style="align-items:flex-start">
+      <div>
+        <div class="row">
+          <span style="font-family:var(--serif);font-size:20px;font-weight:600">${esc(j.name)}</span>
+          <span class="pill ${cls}">${text}</span>
+          ${j.stale ? '<span class="pill err">driver 已消失</span>' : ""}
+        </div>
+        <div class="muted mono" style="margin-top:6px">→ ${esc(j.out_name)}${j.total_chunks ? "　·　" + j.total_chunks + " 段" : ""}</div>
+      </div>
+      <div class="row">
+        <span class="mono" style="font-size:30px;font-weight:500;color:var(--accent);line-height:1">${j.pct.toFixed(1)}%</span>
+        <button type="button" onclick="cancelJob('${j.job_id}')">取消</button>
+      </div>
+    </div>
+    <div class="bar" style="margin-top:18px"><i style="width:${j.pct}%"></i></div>
+    ${chunkCells(j)}
+  </div>`;
+}
+
+function histRow(j) {
+  const [text, cls] = STATE[j.state] || [j.state, "idle"];
+  return `<div class="spread" style="padding:11px 0;border-bottom:1px solid var(--line-soft)">
+    <div style="min-width:0">
+      <div class="row"><span style="font-size:14px">${esc(j.out_name || j.name)}</span>
+        <span class="pill ${cls}">${text}</span></div>
+      <div class="muted mono">${j.job_id}${j.size ? "　·　" + mib(j.size) : ""}</div>
+      ${j.warning ? `<div class="warn">${esc(j.warning)}</div>` : ""}
+      ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
+    </div>
+    <button type="button" onclick="forgetJob('${j.job_id}')">移除</button>
+  </div>`;
+}
+
+function paint(el, html) {   // 內容沒變就不動 DOM，避免每 2 秒重繪造成閃爍與操作中斷
+  if (html !== el._last) { el.innerHTML = html; el._last = html; }
+}
+
+async function loadJobs() {
+  const list = await fetch("/api/jobs").then(r => r.json());
+  const running = list.filter(j => !TERMINAL.includes(j.state));
+  const past = list.filter(j => TERMINAL.includes(j.state));
+
+  paint($("active"), running.map(activeCard).join(""));
+  $("histLabel").textContent = past.length ? `歷史（${past.length} 筆已結束）` : "歷史";
+  $("hist").classList.toggle("hide", past.length === 0);
+  if ($("hist").open) paint($("histBody"), past.map(histRow).join(""));
+}
+
 async function cancelJob(id) {
   if (!confirm("確定取消這個工作？已編碼的段落會留在 Volume 上。")) return;
   await fetch(`/api/jobs/${id}/cancel`, {method: "POST"}); loadJobs();
 }
 async function forgetJob(id) {
-  await fetch("/api/jobs/" + id, {method: "DELETE"}); loadJobs();
+  await fetch("/api/jobs/" + id, {method: "DELETE"});
+  $("histBody")._last = null; loadJobs();
 }
+$("hist").addEventListener("toggle", () => { $("histBody")._last = null; loadJobs(); });
 
 // ---- 檔案 ----------------------------------------------------------------
 async function loadFiles() {
   const f = await fetch("/api/files").then(r => r.json());
-  window._in = f.in;
 
   const sel = $("name"), keep = sel.value;
-  sel.innerHTML = f.in.map(x => `<option>${x.name}</option>`).join("")
-                  || '<option value="">（先上傳原片）</option>';
+  const opts = f.in.map(x => `<option>${esc(x.name)}</option>`).join("")
+               || '<option value="">（先上傳原片）</option>';
+  if (opts !== sel._last) { sel.innerHTML = opts; sel._last = opts; }
   if (f.in.some(x => x.name === keep)) sel.value = keep;
 
-  $("out").innerHTML = f.out.length ? `<table>${f.out.map(x => `
-    <tr><td>${x.name}</td><td class="num">${mib(x.size)}</td>
-    <td class="num" style="width:150px">
-      <a href="/api/download?path=${encodeURIComponent(x.path)}"><button>下載</button></a>
-      <button class="danger" onclick="rmFile('${x.path}')">刪除</button></td></tr>`).join("")}</table>`
-    : '<p class="muted">還沒有成品。</p>';
+  $("outTotal").textContent = f.out.length ? mib(f.out.reduce((s, x) => s + x.size, 0)) : "";
+  paint($("out"), f.out.length ? `<table><tbody>${f.out.map(x => `
+    <tr><td>${esc(x.name)}</td><td class="num">${mib(x.size)}</td><td class="act">
+      <a class="btn" href="/api/download?path=${encodeURIComponent(x.path)}">下載</a>
+      <button type="button" class="icon" aria-label="刪除 ${esc(x.name)}" onclick="rmFile('${esc(x.path)}')">${ICON_TRASH}</button>
+    </td></tr>`).join("")}</tbody></table>`
+    : '<p class="muted" style="margin:0">還沒有成品。</p>');
 
-  $("in").innerHTML = f.in.length ? `<table>${f.in.map(x => `
-    <tr><td>${x.name}</td><td class="num">${mib(x.size)}</td>
-    <td class="num" style="width:80px">
-      <button class="danger" onclick="rmFile('${x.path}')">刪除</button></td></tr>`).join("")}</table>`
-    : '<p class="muted">還沒有原片。</p>';
+  paint($("in"), f.in.length ? `<table><tbody>${f.in.map(x => `
+    <tr><td>${esc(x.name)}</td><td class="num">${mib(x.size)}</td><td class="act">
+      <button type="button" class="icon" aria-label="刪除 ${esc(x.name)}" onclick="rmFile('${esc(x.path)}')">${ICON_TRASH}</button>
+    </td></tr>`).join("")}</tbody></table>`
+    : '<p class="muted" style="margin:0">還沒有原片。</p>');
 
   estimate();
+  loadWork();
+}
+
+// ---- 預算 ----------------------------------------------------------------
+// 數字全部來自 Modal 的 billing API（workspace.billing.summary/report），
+// 不是本機推算的。唯一存在本機的是「每月額度」—— API 只說用掉多少，不說上限。
+async function loadBudget() {
+  const b = await fetch("/api/billing").then(r => r.json()).catch(() => null);
+  if (!b) return;
+  window._budget = b;
+
+  const left = b.remaining, pct = Math.min(100, b.metered / b.allowance * 100);
+  const low = left < b.allowance * 0.15;
+  $("budgetLeft").textContent = "$" + left.toFixed(2);
+  $("budgetLeft").style.color = low ? "var(--err)" : "var(--accent)";
+  $("budgetUsed").textContent =
+    `已用 $${b.metered.toFixed(2)} / $${b.allowance.toFixed(0)}　·　${pct.toFixed(0)}%`;
+  $("budgetCycle").textContent = `${b.cycle_start} ～ ${b.cycle_end}` + (b.stale ? "　·　數字可能過時" : "");
+  $("budgetCycle").style.color = b.stale ? "var(--err)" : "";
+  const bar = $("budgetBar");
+  bar.style.width = pct + "%";
+  bar.style.background = low ? "var(--err)" : "var(--accent)";
+  if (document.activeElement !== $("allowance")) $("allowance").value = b.allowance;
+
+  // 把週期內每一天都畫出來（沒花錢的補 0），否則只有兩天有資料時
+  // 會變成兩個佔半個版面的色塊，看起來不像圖表
+  const byDate = Object.fromEntries(b.daily.map(d => [d.date, d.cost]));
+  const days = [];
+  for (let t = new Date(b.cycle_start + "T00:00"), today = new Date();
+       t <= today && days.length < 40; t.setDate(t.getDate() + 1)) {
+    const key = t.toLocaleDateString("sv");     // sv locale 就是 YYYY-MM-DD
+    days.push({date: key, cost: byDate[key] || 0});
+  }
+  const max = Math.max(...days.map(d => d.cost), 0.01);
+  $("budgetDays").innerHTML = days.map(d => `
+    <div title="${d.date}　$${d.cost.toFixed(2)}">
+      <i class="${d.cost === max ? "big" : ""}" style="height:${Math.max(d.cost / max * 100, 1)}%"></i>
+    </div>`).join("");
+
+  $("budgetBreak").textContent = Object.entries(b.breakdown)
+    .map(([k, v]) => `${k} $${v.toFixed(2)}`).join("　·　");
+  estimate();
+}
+
+$("allowance").onchange = async e => {
+  await fetch("/api/billing/allowance", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({allowance: +e.target.value})});
+  loadBudget();
+};
+
+async function loadWork() {
+  const w = await fetch("/api/work").then(r => r.json()).catch(() => null);
+  if (!w) return;
+  $("workCard").classList.toggle("hide", w.bytes === 0);
+  $("workTotal").textContent = mib(w.bytes);
+  $("workNote").textContent =
+    `${w.dirs.length} 個未完成的工作留下的切段。重送相同參數會直接沿用，不必重編。`;
+}
+
+async function gcWork() {
+  if (!confirm("清掉所有暫存切段？重送時就得從頭重編。")) return;
+  const r = await fetch("/api/work/gc", {method: "POST"});
+  if (!r.ok) return alert("清理失敗：" + (await r.text()));
+  loadWork();
 }
 
 async function rmFile(path) {
@@ -322,17 +543,16 @@ async function stopApp() {
   loadJobs();
 }
 
-// 自排程輪詢，不用 setInterval：每輪等上一輪結束才排下一輪，
-// 否則請求慢的時候會無止境堆疊。
+// 自排程輪詢：每輪等上一輪結束才排下一輪，慢的時候不會堆疊
 function poll(fn, gap) {
   (async function loop() {
     try { await fn(); } catch (e) { /* 網路瞬斷就下一輪再說 */ }
     setTimeout(loop, gap);
   })();
 }
-
-poll(loadJobs, 2000);      // poll 會立刻跑第一輪，不需要另外呼叫一次
+poll(loadJobs, 2000);
 poll(loadFiles, 15000);
+poll(loadBudget, 300000);  // billing report 有速率限制，server 端也快取 10 分鐘
 </script>
 </body>
 </html>

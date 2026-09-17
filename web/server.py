@@ -6,11 +6,14 @@ r"""本機控制台。只綁 127.0.0.1。
 關掉瀏覽器、關掉這個 server、關機都不影響。
 """
 
+import datetime
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request
@@ -81,8 +84,13 @@ def _listdir(d):
                  "size": getattr(e, "size", 0) or 0,
                  "mtime": getattr(e, "mtime", 0) or 0}
                 for e in vol().listdir(d)]
-    except Exception:
-        return []
+    except FileNotFoundError:
+        return []                       # 資料夾還不存在，正常
+    except Exception as e:
+        # 其他錯誤不要吞掉：曾經因為這裡的 except Exception 把整個清單變成空的，
+        # 前端顯示「還沒有原片」，看起來像 Volume 空了，其實是連線出錯。
+        print("listdir({!r}) 失敗：{!r}".format(d, e), flush=True)
+        raise HTTPException(502, "讀取 Volume 失敗：{}".format(e))
 
 
 @app.get("/api/files")
@@ -97,6 +105,155 @@ def remove_file(path: str):
         raise HTTPException(400, "只能刪 in/ 或 out/ 底下的檔案")
     vol().remove_file(path)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# 預算
+# --------------------------------------------------------------------------
+
+BUDGET_FILE = os.path.join(ROOT, "budget.json")
+BILLING_CACHE_FILE = os.path.join(ROOT, ".billing-cache.json")
+
+
+def _load_billing_cache() -> dict:
+    """快取寫到磁碟：billing report 有速率限制，重啟 server 不該又去打一次。"""
+    try:
+        with open(BILLING_CACHE_FILE, encoding="utf-8") as f:
+            c = json.load(f)
+        return {"at": float(c["at"]), "data": c["data"]}
+    except Exception:
+        return {"at": 0.0, "data": None}
+
+
+_billing_cache = _load_billing_cache()
+
+
+def _allowance() -> float:
+    """每月免費額度。Modal 的 API 只回報「已用掉多少」，沒有告訴你上限是多少，
+    所以額度本身存在本機，預設 Starter 方案的 30 美元。"""
+    try:
+        with open(BUDGET_FILE, encoding="utf-8") as f:
+            return float(json.load(f)["allowance"])
+    except Exception:
+        return 30.0
+
+
+BILLING_TTL = 600     # billing report 有速率限制，不能頻繁打
+
+
+def _with_allowance(data: dict) -> dict:
+    """額度是本機設定，不吃快取。"""
+    out = dict(data)
+    out["allowance"] = _allowance()
+    out["remaining"] = out["allowance"] - out["metered"]
+    return out
+
+
+def _fetch_billing() -> dict:
+    w = modal.Workspace.from_context()
+    s = w.billing.summary()
+
+    # 報表只回傳「完整的區間」，所以用日解析度時，今天整天都會被排除 ——
+    # 而花費多半就發生在今天。近 7 天改用小時解析度（那是 API 的上限），
+    # 只剩當前這一小時不完整。
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cut = max(s.start, (now - datetime.timedelta(days=6)).replace(
+        minute=0, second=0, microsecond=0))
+    rows = []
+    if cut > s.start:
+        rows += w.billing.report(start=s.start, end=cut, resolution="d")
+    rows += w.billing.report(start=cut, resolution="h")
+
+    daily, by_app = {}, {}
+    for r in rows:
+        # 依本地時區分桶：使用者想的是「今天花了多少」，不是 UTC 的今天
+        day = r["interval_start"].astimezone().date().isoformat()
+        cost = float(r["cost"])
+        daily[day] = daily.get(day, 0.0) + cost
+        by_app[r["description"]] = by_app.get(r["description"], 0.0) + cost
+
+    return {
+        "cycle_start": s.start.date().isoformat(),
+        "cycle_end": s.end.date().isoformat(),
+        "metered": float(s.metered_cost),
+        "billed": float(s.billed_cost),
+        "breakdown": {k: float(v) for k, v in s.metered_cost_breakdown.items() if float(v) > 0},
+        "daily": [{"date": k, "cost": v} for k, v in sorted(daily.items())],
+        "by_app": sorted(({"name": k, "cost": v} for k, v in by_app.items()),
+                         key=lambda x: -x["cost"])[:6],
+        "fetched_at": time.time(),
+        "stale": False,
+    }
+
+
+@app.get("/api/billing")
+def billing(refresh: bool = False):
+    now = time.time()
+    cached = _billing_cache["data"]
+    if cached and not refresh and now - _billing_cache["at"] < BILLING_TTL:
+        return _with_allowance(cached)
+
+    try:
+        data = _fetch_billing()
+        _billing_cache.update(at=now, data=data)
+        try:
+            with open(BILLING_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"at": now, "data": data}, f)
+        except OSError:
+            pass
+        return _with_allowance(data)
+    except Exception as e:
+        if cached:
+            # 被限流或斷線時給舊數字並標記，總比整塊消失好
+            stale = _with_allowance(cached)
+            stale["stale"] = True
+            stale["error"] = repr(e)[:200]
+            return stale
+        raise HTTPException(502, "讀取帳務失敗：{}".format(e))
+
+
+@app.post("/api/billing/allowance")
+async def set_allowance(request: Request):
+    body = await request.json()
+    v = float(body.get("allowance", 30))
+    if not (0 < v <= 100000):
+        raise HTTPException(400, "額度不合理")
+    with open(BUDGET_FILE, "w", encoding="utf-8") as f:
+        json.dump({"allowance": v}, f)
+    return {"ok": True, "allowance": v}
+
+
+@app.get("/api/work")
+def work_stat():
+    """work/ 底下的暫存切段。成功的 job 會自己清掉，失敗或取消的會留著供重送沿用。"""
+    dirs = {}
+    try:
+        entries = vol().listdir("work", recursive=True)
+    except FileNotFoundError:
+        return {"dirs": [], "bytes": 0}
+    for e in entries:
+        parts = e.path.split("/")
+        if len(parts) != 3:            # 只算 work/<key>/<file>，跳過目錄本身
+            continue
+        dirs[parts[1]] = dirs.get(parts[1], 0) + (getattr(e, "size", 0) or 0)
+    return {"dirs": [{"name": k, "bytes": v} for k, v in sorted(dirs.items())],
+            "bytes": sum(dirs.values())}
+
+
+@app.post("/api/work/gc")
+def work_gc():
+    d = jd()
+    snap = jobspec.snapshot(d)
+    running = [j for j in (snap.get("jobs:index") or [])
+               if jobspec.read_job(d, j, snap)["state"] not in jobspec.TERMINAL]
+    if running:
+        raise HTTPException(409, "還有 {} 個工作在進行中，清掉暫存會讓它們失敗".format(len(running)))
+
+    removed = []
+    for entry in work_stat()["dirs"]:
+        vol().remove_file("work/" + entry["name"], recursive=True)
+        removed.append(entry["name"])
+    return {"ok": True, "removed": removed}
 
 
 @app.get("/api/download")
@@ -197,8 +354,9 @@ def list_jobs():
     out = []
     for jid in reversed(snap.get("jobs:index") or []):
         j = jobspec.read_job(d, jid, snap)
-        j.pop("chunks", None)        # 清單不需要每段明細，展開時才抓
-        _mark_stale(j)
+        if j["state"] in jobspec.TERMINAL:
+            j.pop("chunks", None)    # 已結束的不需要每段明細
+        _mark_stale(j)               # 快照已含每段資料，進行中的直接帶著，不多花 round-trip
         out.append(j)
     return out
 

@@ -5,8 +5,14 @@
 
 刻意不提供 local_entrypoint —— `modal run` 開的是 ephemeral app，
 本機一斷線容器就跟著死，全片轉到一半白做。一律走 submit.py / 網頁。
+
+工作目錄用「內容」決定名字而不是 job_id：切段目錄由（來源檔名 + 每段秒數）
+決定，編碼檔名再多吃（preset、crf、gop、svt）。因此取消後重送會沿用已經
+編好的段落，而改了任何編碼參數就自動不會沿用 —— 不必信任誰記得清快取。
 """
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -34,6 +40,24 @@ HOUR = 3600
 
 
 # --------------------------------------------------------------------------
+# 內容定址
+# --------------------------------------------------------------------------
+
+def _key(*parts) -> str:
+    return hashlib.sha1("|".join(str(x) for x in parts).encode()).hexdigest()[:12]
+
+
+def work_dir(name: str, chunk_sec: int) -> str:
+    """切段結果只跟來源與段長有關。"""
+    return "/data/work/{}".format(_key(name, chunk_sec))
+
+
+def enc_key(p: dict) -> str:
+    """編碼結果還要看編碼參數 —— 改了 crf 就不該沿用舊的段落。"""
+    return _key(p["preset"], p["crf"], p["gop"], p["svt"])
+
+
+# --------------------------------------------------------------------------
 # 容器內的小工具
 # --------------------------------------------------------------------------
 
@@ -49,6 +73,14 @@ def _run(cmd: list) -> None:
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError("{} 失敗（{}）：\n{}".format(cmd[0], r.returncode, r.stderr[-4000:]))
+
+
+def _publish(src_tmp: str, dst: str) -> None:
+    """先寫 .part 再 rename：容器中途死掉不會在 dst 留下半個檔，
+    否則下一輪會把半成品當成「已完成」沿用。"""
+    part = dst + ".part"
+    shutil.copy(src_tmp, part)
+    os.replace(part, dst)
 
 
 def _put_chunk(job_id: str, idx: int, **kw) -> None:
@@ -111,39 +143,73 @@ def _encode_with_progress(cmd: list, total: float, report) -> None:
 
 @app.function(image=image, volumes={"/data": vol}, cpu=4, memory=4096,
               timeout=2 * HOUR, retries=2)
-def split(job_id: str, name: str, chunk_sec: int) -> list:
+def split(name: str, chunk_sec: int) -> dict:
     """依來源的關鍵影格切段（-c copy，不重新編碼，零損失）。
 
     只取視訊：段落較小，而且音軌完全不碰、留到 merge 才從原片 mux 回去，
     避免逐段複製音訊累積出同步漂移。
+    切好的結果附一份 manifest，下次同樣的來源與段長就直接沿用。
     """
-    work = "/data/work/{}".format(job_id)
+    work = work_dir(name, chunk_sec)
+    src = "/data/in/{}".format(name)
+    vol.reload()
+
+    src_size = os.path.getsize(src)
+    man_path = "{}/split.json".format(work)
+    if os.path.exists(man_path):
+        try:
+            man = json.load(open(man_path))
+            if (man.get("src_size") == src_size
+                    and all(os.path.exists("{}/{}".format(work, f)) for f in man["parts"])):
+                print("沿用既有切段：{} 段".format(len(man["parts"])))
+                return {"work": work, "parts": man["parts"], "reused": True}
+        except Exception as e:
+            print("manifest 壞了，重新切段：", repr(e))
+
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work, exist_ok=True)
 
-    _run(["ffmpeg", "-hide_banner", "-y", "-i", "/data/in/{}".format(name),
+    _run(["ffmpeg", "-hide_banner", "-y", "-i", src,
           "-map", "0:v:0", "-c", "copy", "-f", "segment",
           "-segment_time", str(chunk_sec), "-reset_timestamps", "1",
           "{}/src_%04d.mkv".format(work)])
-    vol.commit()
 
     parts = sorted(f for f in os.listdir(work) if f.startswith("src_"))
+    json.dump({"name": name, "chunk_sec": chunk_sec, "src_size": src_size, "parts": parts},
+              open(man_path, "w"))
+    vol.commit()
+
     print("切成 {} 段".format(len(parts)))
-    return parts
+    return {"work": work, "parts": parts, "reused": False}
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=8, memory=8192,
               timeout=12 * HOUR, retries=2)
 def encode_chunk(arg: dict) -> str:
-    """編碼一段。被搶佔時只有這一段要重來。"""
+    """編碼一段。被搶佔時只有這一段要重來。
+
+    已經編好且長度正確的段落直接沿用 —— 這是取消後重送不必從頭再來的關鍵。
+    """
     job_id, idx, src, p = arg["job_id"], arg["idx"], arg["src"], arg["params"]
-    work = "/data/work/{}".format(job_id)
+    work, key = arg["work"], arg["enc_key"]
     vol.reload()
 
     total = _duration("{}/{}".format(work, src))
-    out_name = src.replace("src_", "enc_")
-    tmp = "/tmp/{}".format(out_name)
+    out_name = "enc_{}_{}".format(key, src[len("src_"):])
+    dst = "{}/{}".format(work, out_name)
 
+    if os.path.exists(dst):
+        try:
+            if abs(_duration(dst) - total) < 0.05:
+                print("沿用第 {} 段".format(idx))
+                _put_chunk(job_id, idx, state="done", pct=100.0, out_time=total,
+                           fps=0.0, total=total, size=os.path.getsize(dst), reused=True)
+                return out_name
+            print("第 {} 段長度不符，重編".format(idx))
+        except Exception as e:
+            print("第 {} 段檢查失敗，重編：{!r}".format(idx, e))
+
+    tmp = "/tmp/{}".format(out_name)
     # 重跑時 pct 歸零，網頁上就看得出這段被搶佔過
     _put_chunk(job_id, idx, state="encoding", pct=0.0, out_time=0.0, fps=0.0, total=total)
 
@@ -152,19 +218,18 @@ def encode_chunk(arg: dict) -> str:
         lambda pct, secs, fps: _put_chunk(job_id, idx, state="encoding",
                                           pct=pct, out_time=secs, fps=fps, total=total))
 
-    shutil.copy(tmp, "{}/{}".format(work, out_name))
+    _publish(tmp, dst)
     vol.commit()
     _put_chunk(job_id, idx, state="done", pct=100.0, out_time=total, fps=0.0,
-               total=total, size=os.path.getsize(tmp))
+               total=total, size=os.path.getsize(tmp), reused=False)
     return out_name
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=4, memory=4096,
               timeout=2 * HOUR, retries=2)
-def merge(job_id: str, name: str, enc_files: list, out_name: str) -> dict:
+def merge(name: str, work: str, enc_files: list, out_name: str) -> dict:
     """concat 各段，再把原片的音軌/字幕 mux 回去。"""
     vol.reload()
-    work = "/data/work/{}".format(job_id)
 
     with open("/tmp/list.txt", "w") as f:
         for e in enc_files:
@@ -197,11 +262,11 @@ def merge(job_id: str, name: str, enc_files: list, out_name: str) -> dict:
         print("注意：", warning)
 
     os.makedirs("/data/out", exist_ok=True)
-    shutil.copy("/tmp/final.mkv", "/data/out/{}".format(out_name))
+    _publish("/tmp/final.mkv", "/data/out/{}".format(out_name))
     vol.commit()
 
     size = os.path.getsize("/tmp/final.mkv")
-    shutil.rmtree(work, ignore_errors=True)   # 成功後才清掉，失敗重跑時 work 還在
+    shutil.rmtree(work, ignore_errors=True)   # 成功後才清掉，失敗重跑時才沿用得到
     vol.commit()
 
     print("完成：out/{} {:.1f} MiB".format(out_name, size / 2 ** 20))
@@ -228,13 +293,13 @@ def encode_clip(job_id: str, name: str, p: dict, out_name: str) -> dict:
                                           pct=pct, out_time=secs, fps=fps, total=total))
 
     os.makedirs("/data/out", exist_ok=True)
-    shutil.copy(tmp, "/data/out/{}".format(out_name))
+    _publish(tmp, "/data/out/{}".format(out_name))
     vol.commit()
 
     size = os.path.getsize(tmp)
     out_d = _duration(tmp)
     _put_chunk(job_id, 0, state="done", pct=100.0, out_time=total, fps=0.0,
-               total=total, size=size)
+               total=total, size=size, reused=False)
     print("完成：out/{} {:.1f} MiB {:.2f}s".format(out_name, size / 2 ** 20, out_d))
     return {"out": "out/{}".format(out_name), "size": size,
             "src_duration": total, "out_duration": out_d, "warning": ""}
@@ -272,10 +337,12 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
             return res
 
         meta(state="splitting")
-        parts = split.remote(job_id, name, p["chunk_sec"])
-        meta(state="encoding", total_chunks=len(parts))
+        sp = split.remote(name, p["chunk_sec"])
+        work, parts = sp["work"], sp["parts"]
+        meta(state="encoding", total_chunks=len(parts), split_reused=sp["reused"])
 
-        args = [{"job_id": job_id, "idx": i, "src": s, "params": p}
+        k = enc_key(p)
+        args = [{"job_id": job_id, "idx": i, "src": s, "params": p, "work": work, "enc_key": k}
                 for i, s in enumerate(parts)]
         results = list(encode_chunk.with_options(cpu=cpu, memory=mem).map(
             args, return_exceptions=True))
@@ -286,10 +353,11 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
                 len(failed), "；".join("第 {} 段 {!r}".format(i, r) for i, r in failed[:3])))
 
         meta(state="merging")
-        res = merge.remote(job_id, name, results, p["out_name"])
+        res = merge.remote(name, work, results, p["out_name"])
         meta(state="done", **res)
         return res
 
     except Exception as e:
+        # work/ 刻意留著：重送時可以沿用已經編好的段落
         meta(state="error", error=repr(e)[:2000])
         raise
