@@ -35,6 +35,13 @@
        letter-spacing: -0.01em; }
   header p { margin: 4px 0 0; font-size: 13px; color: var(--dim); }
 
+  .tabs { display: flex; gap: 4px; margin: 20px 0 16px; border-bottom: 1px solid var(--line); }
+  .tabs button { border: none; border-radius: 0; background: transparent; padding: 10px 18px;
+                 font-size: 14px; color: var(--dim); border-bottom: 2px solid transparent;
+                 margin-bottom: -1px; }
+  .tabs button:hover { color: var(--accent); }
+  .tabs button.on { color: var(--fg); border-bottom-color: var(--accent); font-weight: 500; }
+
   .cols { display: flex; gap: 24px; align-items: flex-start; }
   aside { width: 396px; flex-shrink: 0; display: flex; flex-direction: column; gap: 16px;
           position: sticky; top: 32px; }
@@ -136,6 +143,34 @@
     <button type="button" onclick="stopApp()">強制停止整個 App</button>
   </header>
 
+  <div class="card" id="budgetCard">
+    <div class="spread" style="margin-bottom:14px">
+      <div class="cap">本月預算</div>
+      <div class="muted mono" id="budgetCycle"></div>
+    </div>
+    <div class="spread" style="align-items:flex-end">
+      <div>
+        <div class="mono" id="budgetLeft" style="font-size:34px;font-weight:500;line-height:1">—</div>
+        <div class="muted" id="budgetUsed" style="margin-top:6px"></div>
+      </div>
+      <div style="text-align:right">
+        <label for="allowance" style="margin-bottom:4px">每月額度（美元）</label>
+        <input class="mono" id="allowance" type="number" step="1" min="1"
+               style="width:110px;text-align:right" value="30">
+      </div>
+    </div>
+    <div class="bar" style="margin-top:16px"><i id="budgetBar" style="width:0"></i></div>
+    <div id="budgetDays" class="days"></div>
+    <div class="muted" id="budgetBreak" style="margin-top:10px"></div>
+  </div>
+
+  <nav class="tabs" id="tabs">
+    <button type="button" data-tab="encode" class="on">轉檔</button>
+    <button type="button" data-tab="test">測試</button>
+    <button type="button" data-tab="preset">模板</button>
+  </nav>
+
+  <section class="panel" id="panel-encode">
   <div class="cols">
     <aside>
 
@@ -190,27 +225,6 @@
     </aside>
 
     <main>
-      <div class="card" id="budgetCard">
-        <div class="spread" style="margin-bottom:14px">
-          <div class="cap">本月預算</div>
-          <div class="muted mono" id="budgetCycle"></div>
-        </div>
-        <div class="spread" style="align-items:flex-end">
-          <div>
-            <div class="mono" id="budgetLeft" style="font-size:34px;font-weight:500;line-height:1">—</div>
-            <div class="muted" id="budgetUsed" style="margin-top:6px"></div>
-          </div>
-          <div style="text-align:right">
-            <label for="allowance" style="margin-bottom:4px">每月額度（美元）</label>
-            <input class="mono" id="allowance" type="number" step="1" min="1"
-                   style="width:110px;text-align:right" value="30">
-          </div>
-        </div>
-        <div class="bar" style="margin-top:16px"><i id="budgetBar" style="width:0"></i></div>
-        <div id="budgetDays" class="days"></div>
-        <div class="muted" id="budgetBreak" style="margin-top:10px"></div>
-      </div>
-
       <div id="active"></div>
 
       <div class="card">
@@ -246,10 +260,62 @@
       </details>
     </main>
   </div>
+  </section>
+
+  <section class="panel hide" id="panel-test">
+    <div class="card">
+      <div class="cap" style="margin-bottom:14px">參數掃描</div>
+      <p class="muted" style="margin:0 0 10px">
+        規劃中：給一支無損 ref 片段，在<strong>同一個容器</strong>裡把 crf 28/30/32/34/36 各編一次，
+        當場用 libvmaf 對 ref 打分，回傳 crf／體積／平均／調和／最低，
+        並附上每一級的 ΔVMAF 與 Δ體積，讓拐點看得出來。
+      </p>
+      <p class="muted" style="margin:0">
+        預設沿用 runbook 的標準（平均 ≥ 95、最低 ≥ 89，取體積最小者），
+        但只當成篩選 —— VMAF 對色帶與暗部不敏感，最後仍要自己看一眼。
+        選定後可一鍵存成模板。
+      </p>
+      <p class="muted" style="margin:14px 0 0">
+        目前請先用「轉檔」分頁的<strong>只轉測試片段</strong>，用不同 tag 各送一次，
+        再以 <code>python vmaf.py ref.mkv</code> 打分。
+      </p>
+    </div>
+  </section>
+
+  <section class="panel hide" id="panel-preset">
+    <div class="card">
+      <div class="cap" style="margin-bottom:14px">模板</div>
+      <p class="muted" style="margin:0 0 10px">
+        規劃中：為不同攝影團隊／片源類型各存一組參數（preset、crf、gop、svt、
+        每段秒數、每段核心），送件時一鍵套用。可匯出／匯入 JSON。
+      </p>
+      <p class="muted" style="margin:0">
+        門檻（平均／最低 VMAF）也會跟著模板走 —— VMAF 量的是「與該來源的距離」，
+        本身拍得好的片源，同樣 95 分的實際觀感並不一樣。
+      </p>
+    </div>
+  </section>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
+
+// ---- 分頁 ----------------------------------------------------------------
+// 純前端切換，不動網址也不加路由。輪詢不受分頁影響 —— 背景還在跑的工作
+// 不會因為你切到別的分頁就停止更新。
+function showTab(name) {
+  document.querySelectorAll("#tabs button").forEach(b =>
+    b.classList.toggle("on", b.dataset.tab === name));
+  document.querySelectorAll(".panel").forEach(p =>
+    p.classList.toggle("hide", p.id !== "panel-" + name));
+  try { localStorage.setItem("av1.tab", name); } catch (e) { /* 無痕模式 */ }
+}
+$("tabs").addEventListener("click", e => {
+  const b = e.target.closest("button[data-tab]");
+  if (b) showTab(b.dataset.tab);
+});
+try { showTab(localStorage.getItem("av1.tab") || "encode"); } catch (e) { showTab("encode"); }
+
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const mib = b => b >= 1073741824 ? (b/1073741824).toFixed(2)+" GiB" : (b/1048576).toFixed(1)+" MiB";
 const hhmmss = s => { s = Math.max(0, Math.round(s));
