@@ -322,6 +322,11 @@
             <div><label for="swMean">門檻・平均</label><input class="mono" id="swMean" type="number" step="0.5" value="95"></div>
             <div><label for="swLow">門檻・最低</label><input class="mono" id="swLow" type="number" step="0.5" value="89"></div>
           </div>
+          <div class="row" style="margin-bottom:14px">
+            <input type="checkbox" id="swRefine" checked>
+            <label for="swRefine" style="margin:0;color:var(--fg);font-size:13px">
+              自動補掃邊界（階梯步進 2 會跳過真正的臨界點）</label>
+          </div>
           <div style="margin-bottom:14px">
             <label for="swSvt">svtav1-params</label>
             <input class="mono" id="swSvt" style="font-size:12px" value="tune=0:enable-overlays=1:enable-qm=1:film-grain=0">
@@ -710,7 +715,8 @@ async function startSweep() {
   await post({mode: "sweep", name: name, ref: isRef ? "in/" + name : "",
               start: $("refStart").value, dur: +$("refDur").value, crfs: crfs,
               preset: +$("swPreset").value, cpu: +$("swCpu").value, svt: $("swSvt").value,
-              min_mean: +$("swMean").value, min_low: +$("swLow").value},
+              min_mean: +$("swMean").value, min_low: +$("swLow").value,
+              refine: $("swRefine").checked},
              isRef ? "已開始掃描" : "已送出，會先切 ref 再掃描");
   $("swGo").disabled = false;
 }
@@ -757,15 +763,17 @@ document.addEventListener("click", e => {
 });
 
 function sweepEstimate() {
-  const crfs = $("swCrfs").value.split(",").filter(s => s.trim()).length;
+  const crfs = $("swCrfs").value.split(",").filter(s => s.trim()).length
+             + ($("swRefine").checked ? 1 : 0);      // 補掃通常多跑一個
   const cpu = +$("swCpu").value, dur = +$("refDur").value || 20;
   const speed = 0.5 * (cpu / 16) * 1.35;
   // 打分大約是編碼時間的一半，所以乘 1.5
   const hrs = crfs * (dur / speed) * 1.5 / 3600;
   const cost = hrs * (cpu * 0.0000131 + cpu * 0.00000222) * 3600;
-  $("swEstimate").innerHTML = `${crfs} 個 crf 平行　·　<span class="mono">≈ $${cost.toFixed(3)}</span>`;
+  $("swEstimate").innerHTML = `約 ${crfs} 個 crf　·　<span class="mono">≈ $${cost.toFixed(3)}</span>`;
 }
 ["swCrfs", "swCpu", "refDur"].forEach(id => $(id).addEventListener("input", sweepEstimate));
+$("swRefine").addEventListener("change", sweepEstimate);
 sweepEstimate();
 
 // ---- 工作 ----------------------------------------------------------------

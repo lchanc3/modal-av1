@@ -511,28 +511,48 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
 
             meta(state="encoding", kind="sweep", total_chunks=len(crfs), ref=ref)
 
-            args = [{"job_id": job_id, "idx": i, "crf": c, "params": p, "ref": ref}
-                    for i, c in enumerate(crfs)]
-            rows = list(sweep_one.with_options(cpu=cpu, memory=mem).map(
-                args, return_exceptions=True))
+            def run_crfs(todo, base_idx):
+                """跑一批 crf，回傳結果列。"""
+                args = [{"job_id": job_id, "idx": base_idx + i, "crf": c,
+                         "params": p, "ref": ref} for i, c in enumerate(todo)]
+                out = list(sweep_one.with_options(cpu=cpu, memory=mem).map(
+                    args, return_exceptions=True))
+                bad = [(i, r) for i, r in enumerate(out) if isinstance(r, Exception)]
+                if bad:
+                    raise RuntimeError("有 {} 個 crf 失敗：{}".format(
+                        len(bad), "；".join("crf {} {!r}".format(todo[i], r) for i, r in bad[:3])))
+                for r in out:
+                    account("crf {}".format(r["crf"]), r)
+                return out
 
-            bad = [(i, r) for i, r in enumerate(rows) if isinstance(r, Exception)]
-            if bad:
-                raise RuntimeError("有 {} 個 crf 失敗：{}".format(
-                    len(bad), "；".join("crf {} {!r}".format(crfs[i], r) for i, r in bad[:3])))
+            def passes(r):
+                return r["vmaf_mean"] >= p["min_mean"] and r["vmaf_min"] >= p["min_low"]
 
-            for r in rows:
-                account("crf {}".format(r["crf"]), r)
+            def best(rs):
+                ok = [r for r in rs if passes(r)]
+                return min(ok, key=lambda r: r["size"])["crf"] if ok else None
+
+            rows = run_crfs(crfs, 0)
+            pick = best(rows)
+
+            # 補掃邊界：階梯步進 2 會跳過真正的臨界點 —— 實測 E1001 的 30 過、
+            # 32 不過，但中間的 31 也過，而且比 30 小 7.7%。多跑一兩個 crf
+            # 只要幾分錢，卻可能省下全片上百 MB。
+            if p.get("refine", True) and pick is not None:
+                worse = [r["crf"] for r in rows if r["crf"] > pick]
+                gap = list(range(pick + 1, min(worse))) if worse else []
+                if 0 < len(gap) <= 3:
+                    print("補掃邊界：", gap)
+                    meta(state="encoding", total_chunks=len(rows) + len(gap), refining=gap)
+                    rows += run_crfs(gap, len(rows))
+                    pick = best(rows)
+
             rows.sort(key=lambda r: r["crf"])
             # 邊際取捨：固定門檻只告訴你過或不過，看不到附近的性價比
             for i, r in enumerate(rows):
                 if i:
                     r["d_vmaf"] = r["vmaf_mean"] - rows[i - 1]["vmaf_mean"]
                     r["d_size"] = r["size"] - rows[i - 1]["size"]
-
-            ok = [r for r in rows
-                  if r["vmaf_mean"] >= p["min_mean"] and r["vmaf_min"] >= p["min_low"]]
-            pick = min(ok, key=lambda r: r["size"])["crf"] if ok else None
 
             res = {"table": rows, "pick": pick, "ref": ref,
                    "min_mean": p["min_mean"], "min_low": p["min_low"]}

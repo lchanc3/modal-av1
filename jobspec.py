@@ -40,6 +40,7 @@ DEFAULTS = {
     "ref": "",
     "min_mean": 95.0,   # runbook 實測出來的標準
     "min_low": 89.0,
+    "refine": True,    # 掃完自動補掃邊界附近被階梯跳過的 crf
 }
 
 TERMINAL = ("done", "error", "cancelled")
@@ -75,6 +76,7 @@ def build(name: str, **over) -> dict:
         p["crfs"] = sorted({int(c) for c in p["crfs"]})
         p["min_mean"] = float(p["min_mean"])
         p["min_low"] = float(p["min_low"])
+        p["refine"] = bool(p["refine"])
         # ref 留空代表「從 name 這支來源自己切一支」，由 driver 處理
         p["out_name"] = "掃描 crf {}".format("/".join(str(c) for c in p["crfs"]))
         return p
