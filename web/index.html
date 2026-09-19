@@ -545,6 +545,13 @@ async function loadUploads() {
 $("test").onchange = e => { $("testOpts").classList.toggle("hide", !e.target.checked); estimate(); };
 ["preset","crf","chunk_sec","cpu","name"].forEach(id => $(id).onchange = estimate);
 
+// 跟 encode.py 的 RATE_CPU_S / RATE_MEM_S 同一組值，改的時候兩邊要一起改。
+// 那邊的註解寫了這兩個數字是怎麼從帳單回歸出來的。
+const RATE_CPU_S = 0.0000262, RATE_MEM_S = 0.00000276;
+
+// 容器是 1 GiB / 核，所以記憶體那項直接用核心數當 GiB 數。
+const rateHr = cpu => (cpu * RATE_CPU_S + cpu * RATE_MEM_S) * 3600;
+
 function estimate() {
   if ($("test").checked || !$("name").value) { $("estimate").textContent = ""; return; }
   const cpu = +$("cpu").value, chunk = +$("chunk_sec").value;
@@ -554,7 +561,7 @@ function estimate() {
   const speed = 0.5 * (cpu / 16) * 1.35;        // 16 核 preset 3 實測 0.5x，核心少時效率略高
   const n = Math.max(1, Math.ceil(dur / chunk));
   const hrs = (dur / speed) / 3600;
-  const cost = hrs * (cpu * 0.0000131 + cpu * 0.00000222) * 3600;
+  const cost = hrs * rateHr(cpu);
   window._estCost = cost;
   const b = window._budget;
   const after = b ? b.remaining - cost : null;
@@ -768,8 +775,9 @@ function sweepEstimate() {
   const cpu = +$("swCpu").value, dur = +$("refDur").value || 20;
   const speed = 0.5 * (cpu / 16) * 1.35;
   // 打分大約是編碼時間的一半，所以乘 1.5
+  // 掃描的容器只活 90 秒左右，開機成本攤不掉，實測費率會比長片高約 15%
   const hrs = crfs * (dur / speed) * 1.5 / 3600;
-  const cost = hrs * (cpu * 0.0000131 + cpu * 0.00000222) * 3600;
+  const cost = hrs * rateHr(cpu) * 1.15;
   $("swEstimate").innerHTML = `約 ${crfs} 個 crf　·　<span class="mono">≈ $${cost.toFixed(3)}</span>`;
 }
 ["swCrfs", "swCpu", "refDur"].forEach(id => $(id).addEventListener("input", sweepEstimate));

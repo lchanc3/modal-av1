@@ -39,15 +39,31 @@ BASE_SVT = "tune=0:enable-overlays=1:enable-qm=1:film-grain=0"
 HOUR = 3600
 
 # Modal 的基本費率（可搶佔）。nonpreemptible 是 3 倍。
-RATE_CPU_S = 0.0000131      # 美元 / 實體核心 / 秒
-RATE_MEM_S = 0.00000222     # 美元 / GiB / 秒
+#
+# 這兩個數字是「用量 → 帳單」的迴歸值，不是 Modal 的牌價：它們把容器開機、
+# 縮容閒置、被搶佔重跑這些「函式內量不到的時間」一起吸收進費率裡，好讓
+# elapsed × 核心數 直接算得出帳單。原本照牌價推的 0.0000131 / 0.00000222
+# 只算到函式體內的時間，實測低估了近一倍。
+#
+# 校正來源：2026-09-19 facialabuse.e1007 全片（16 段 / 62.4 分鐘）。
+# 帳單 cost_by_resource 為 CPU $2.2556、Memory $0.2404，比例 9.38:1；
+# 舊常數在 8 核 8 GiB 下只有 5.90:1。沒回報的時間會同時放大 CPU 和 Memory、
+# 不會動到比例，所以比例對不上就代表常數本身偏了，而且是 CPU 偏得多。
+# 用這組新值回推：全片那趟算出 $2.5009、實收 $2.4960（100.2%）。
+#
+# 已知偏差：20 秒的 crf 掃描會低估約 13%（同一天實測 $0.1326 vs $0.1526）。
+# 每個容器的固定開機成本攤在 90 秒的工作上，比攤在 10 分鐘上重得多，
+# 單一費率吃不掉這段。掃描一趟才一毛多，不值得為它再開一組常數。
+RATE_CPU_S = 0.0000262      # 美元 / 實體核心 / 秒
+RATE_MEM_S = 0.00000276     # 美元 / GiB / 秒
 
 
 def _usage(t0: float, cpu: float, mem_mib: int, nonpreemptible: bool = False) -> dict:
     """一個階段實際用掉的資源與費用。
 
-    注意這只涵蓋「成功跑完」的容器 —— 被搶佔而中途死掉的那些不會回報，
-    所以這個數字是下限，跟帳單的差額就是重跑浪費掉的部分。
+    elapsed 只是函式體內的時間，但費率已經把容器開機與重跑攤進去了（見上面
+    RATE_CPU_S 的說明），所以 cost 對得上帳單。elapsed 本身仍然只是下限，
+    要看真正的牆鐘請用 driver 的 wall。
     """
     el = time.time() - t0
     rate = cpu * RATE_CPU_S + (mem_mib / 1024.0) * RATE_MEM_S
@@ -457,15 +473,23 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
     stages = []          # 每個成功跑完的容器回報的用量
 
     def account(label, res):
-        """把一個階段的用量收進來，並回傳原本的結果。"""
-        u = (res or {}).get("usage")
+        """把一個階段的用量收進來，並回傳原本的結果。
+
+        pop 而不是 get：usage 收進 stages 之後就不該再跟著 res 走。留著的話，
+        下面 meta(state="done", usage=totals(), **res) 會因為 res 裡也有一個
+        usage 而炸成 TypeError（multiple values for keyword argument）。
+
+        副作用：sweep 的 table 每列不再帶自己的 usage。那份資料本來就跟
+        totals()["stages"] 裡的 "crf N" 完全重複，前端讀的也是後者。
+        """
+        u = (res or {}).pop("usage", None)
         if u:
             stages.append(dict(u, stage=label))
         return res
 
     def totals():
         """實際用量。只含成功跑完的容器 —— 被搶佔中途死掉的不會回報，
-        所以這是下限，跟帳單的差額就是重跑浪費掉的。"""
+        所以核心秒是下限；費率已經把那段攤進去，cost 仍然對得上帳單。"""
         drv = _usage(t_job, 0.25, 512, nonpreemptible=True)
         all_stages = stages + [dict(drv, stage="driver")]
         return {
