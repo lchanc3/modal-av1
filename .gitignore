@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 編輯器 / 作業系統
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.bak
+
+# 機密（Modal 的登入 token 在 %USERPROFILE%\.modal.toml，不在 repo 裡）
+.env
+*.key
+
+# 本機工作目錄與轉檔產物
+out/
+*.mkv
+*.mp4
+vmaf_tmp.json
+
+# 本機設定與快取，不進版控
+budget.json
+.billing-cache.json
+templates.json
