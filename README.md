@@ -204,3 +204,12 @@ modal app stop av1-encode
 | 輸出比來源長 | 來源帶 edit list（起始裁切），`-c copy` 切段會把被隱藏的前置幀一起帶出來。不是合併出錯 |
 | 送件後網頁沒反應 | 先看 `modal app list`，工作在雲端跑，與網頁無關 |
 | Windows 主控台中文亂碼 | `chcp 65001` 並設 `PYTHONIOENCODING=utf-8`，`start-web.bat` 已經做了 |
+
+## 授權
+
+[GNU General Public License v3.0](LICENSE)　Copyright (C) 2026 shiho
+
+可自由使用、修改、散布，但**散布修改後的版本時必須同樣以 GPL-3.0 公開原始碼**。
+
+容器裡用的 ffmpeg 是官方 GPL 建置，在容器建置時才下載（見 `encode.py` 的
+`image`），本 repo 不散布其二進位檔。
