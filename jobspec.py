@@ -38,7 +38,7 @@ DEFAULTS = {
     # 參數掃描
     "crfs": [28, 30, 32, 34, 36],
     "ref": "",
-    "min_mean": 95.0,   # runbook 實測出來的標準
+    "min_mean": 95.0,   # README 實測出來的標準
     "min_low": 89.0,
     "refine": True,    # 掃完自動補掃邊界附近被階梯跳過的 crf
 }
