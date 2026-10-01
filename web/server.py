@@ -23,7 +23,14 @@ from starlette.concurrency import run_in_threadpool
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import modal          # noqa: E402
+import modal.volume   # noqa: E402
 import jobspec        # noqa: E402
+
+# modal 1.5.5 的 v1 Volume 上傳：這個時限從「開始傳 blob 之前」就起算，
+# 傳完才進入等 Modal 確認的迴圈。blob 本身傳超過一小時，迴圈一次都不跑就直接
+# VolumeUploadTimeoutError —— 上傳頻寬約 4 MB/s 時，8 GB 的片子加上分段重送就會踩到。
+# 它是模組層級變數、每次用到才讀，所以在這裡改就有效。
+modal.volume.VOLUME_PUT_FILE_CLIENT_TIMEOUT = 12 * 3600
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -418,14 +425,22 @@ def _progress_cb(uid):
     protocol：cb(name=, size=) 回傳 task_id；之後 cb(task_id, advance=n)；
     結束時 cb(task_id=, complete=True)。advance 來自真正的網路上傳，
     不含算雜湊那一遍。
+
+    某個分段傳失敗要重送時會先來一個 cb(reset=True)，但不說那段送了多少。
+    以前忽略它，重送的位元組被重複計入，進度條在還沒傳完時就頂在 100%
+    （8.4 GB 的片子實測多讀了 4 GB 以上）。比照 modal CLI 歸零重數：
+    會低估已完成的分段，但不會假裝傳完。
     """
     def cb(task_id=None, **kw):
         u = UPLOADS.get(uid)
         if u is not None:
             if kw.get("size"):
                 u["total"] = kw["size"]
+            if kw.get("reset"):
+                u["sent"] = 0
+                u["retries"] = u.get("retries", 0) + 1
             if kw.get("advance"):
-                u["sent"] = min(u["total"], u["sent"] + kw["advance"])
+                u["sent"] = max(0, min(u["total"], u["sent"] + kw["advance"]))
             if kw.get("complete"):
                 u["sent"] = u["total"]
         return 0
@@ -433,23 +448,26 @@ def _progress_cb(uid):
 
 
 def _upload_with_progress(src_path, remote, uid) -> bool:
-    """用 Modal 自己的進度回呼上傳。成功回傳 True。
+    """用 Modal 自己的進度回呼上傳。成功回傳 True，內部 API 用不了回傳 False。
 
     batch_upload() 沒有把 progress_cb 露出來，所以走跟 modal CLI 同一條路。
-    那是內部 API，因此失敗就退回估算版，讓上傳本身不會因為它而壞掉。
+    那是內部 API，所以「拿不到」時退回估算版；但上傳本身的錯誤（網路、timeout）
+    要照常丟出去。以前兩者一起吞掉，8 GB 的片子傳了一小時 timeout 之後
+    會默默整個重傳，網頁上完全看不到出過錯。
     """
     try:
         from modal.volume import AbstractVolumeUploadContextManager
         v = vol()
         v.hydrate()
-        with AbstractVolumeUploadContextManager.resolve(
-                v._get_metadata().version, v.object_id, v.client,
-                progress_cb=_progress_cb(uid), force=True) as batch:
-            batch.put_file(src_path, remote)
-        return True
+        batch_cm = AbstractVolumeUploadContextManager.resolve(
+            v._get_metadata().version, v.object_id, v.client,
+            progress_cb=_progress_cb(uid), force=True)
     except Exception as e:
-        print("進度回呼版上傳失敗，改用估算版：{!r}".format(e), flush=True)
+        print("進度回呼版用不了，改用估算版：{!r}".format(e), flush=True)
         return False
+    with batch_cm as batch:
+        batch.put_file(src_path, remote)
+    return True
 
 
 class _Counting:

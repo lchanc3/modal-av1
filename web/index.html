@@ -529,9 +529,13 @@ async function loadUploads() {
   paint($("up"), ups.map(u => {
     const pct = u.total ? Math.min(100, u.sent / u.total * 100) : 0;
     const bad = u.phase === "error";
+    // 位元組送完之後 Modal 還要組合分段、寫進 Volume，大檔可能要好幾分鐘
+    const phase = u.phase === "modal" && pct >= 100 ? "等 Modal 寫入 Volume"
+                : UP_PHASE[u.phase] || u.phase;
+    const retry = u.retries ? `（分段重送 ${u.retries} 次）` : "";
     return `<div style="margin-top:14px">
       <div class="spread">
-        <span class="muted">${esc(u.name)}　${UP_PHASE[u.phase] || u.phase}</span>
+        <span class="muted">${esc(u.name)}　${phase}${retry}</span>
         <span class="muted mono">${pct.toFixed(1)}%</span>
       </div>
       <div class="bar ${bad ? "err" : u.phase === "done" ? "ok" : ""}" style="margin-top:6px">
