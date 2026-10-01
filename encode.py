@@ -54,6 +54,10 @@ HOUR = 3600
 # 已知偏差：20 秒的 crf 掃描會低估約 13%（同一天實測 $0.1326 vs $0.1526）。
 # 每個容器的固定開機成本攤在 90 秒的工作上，比攤在 10 分鐘上重得多，
 # 單一費率吃不掉這段。掃描一趟才一毛多，不值得為它再開一組常數。
+# 掃描選中的 crf 預估輸出達到原片這個比例以上，就警告「轉了不值得」。
+# 前端 index.html 的同名常數要一起改。
+SWEEP_WORTH = 0.9
+
 RATE_CPU_S = 0.0000262      # 美元 / 實體核心 / 秒
 RATE_MEM_S = 0.00000276     # 美元 / GiB / 秒
 
@@ -98,6 +102,41 @@ def _duration(path: str) -> float:
                         "-of", "default=nw=1:nk=1", path],
                        capture_output=True, text=True, check=True)
     return float(r.stdout.strip())
+
+
+def _secs(t) -> float:
+    """'00:05:00'、'5:00'、'300'、300 → 秒。"""
+    s = 0.0
+    for part in str(t).split(":"):
+        s = s * 60 + float(part)
+    return s
+
+
+def _src_stats(path: str, start, dur: float) -> dict:
+    """原片的視訊位元率：ref 那一段的，和全片平均的。
+
+    掃描結果要跟「同一段」的原片比才公平 —— 同一支片的段落之間位元率可以差好幾倍。
+    只讀這一段的封包大小（不解碼），4K 片也只要幾秒。全片平均用來換算預估總大小。
+    """
+    s = _secs(start)
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                        "-read_intervals", "{}%+{}".format(s, dur + 1),
+                        "-show_entries", "packet=pts_time,size", "-of", "json", path],
+                       capture_output=True, text=True, check=True)
+    seg = sum(int(k["size"]) for k in json.loads(r.stdout).get("packets", [])
+              if k.get("pts_time") not in (None, "N/A") and s <= float(k["pts_time"]) < s + dur)
+
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=bit_rate:format=duration,size", "-of", "json", path],
+                       capture_output=True, text=True, check=True)
+    info = json.loads(r.stdout)
+    fmt = info.get("format", {})
+    total_d, size = float(fmt["duration"]), int(fmt["size"])
+    # mkv 常常沒有 stream bit_rate，退回整檔平均（含音軌，所以會略微高估原片）
+    br = (info.get("streams") or [{}])[0].get("bit_rate")
+    kbps = int(br) / 1000 if br not in (None, "N/A") else size * 8 / total_d / 1000
+    return {"src_seg_kbps": round(seg * 8 / dur / 1000, 1), "src_kbps": round(kbps, 1),
+            "src_duration": total_d, "src_bytes": size}
 
 
 def _run(cmd: list) -> None:
@@ -393,7 +432,16 @@ def make_ref(name: str, start: str, dur: int) -> dict:
     out = "ref_{}_{}s.mkv".format(stem, dur)
     tmp = "/tmp/" + out
     dst = "/data/in/{}".format(out)
+    src = "/data/in/{}".format(name)
     vol.reload()
+
+    # 量不到只是少了「相對原片」那一欄，不該讓整個掃描失敗
+    try:
+        stats = _src_stats(src, start, dur)
+        print("原片視訊：這段 {src_seg_kbps:.0f} kbps、全片平均 {src_kbps:.0f} kbps".format(**stats))
+    except Exception as e:
+        print("量原片位元率失敗：", repr(e))
+        stats = {}
 
     # 檔名由來源與長度決定，所以同樣的組合可以直接沿用，不必重切
     if os.path.exists(dst):
@@ -403,12 +451,12 @@ def make_ref(name: str, start: str, dur: int) -> dict:
                 print("沿用既有 ref：in/{}".format(out))
                 return {"ref": "in/{}".format(out), "ref_name": out,
                         "size": os.path.getsize(dst), "out_duration": d, "reused": True,
-                        "usage": _usage(t0, 4, 4096)}
+                        "src_stats": stats, "usage": _usage(t0, 4, 4096)}
         except Exception as e:
             print("既有 ref 檢查失敗，重切：", repr(e))
 
     _run(["ffmpeg", "-hide_banner", "-y", "-ss", start, "-t", str(dur),
-          "-i", "/data/in/{}".format(name),
+          "-i", src,
           "-map", "0:v:0", "-an", "-sn",
           "-c:v", "libx264", "-qp", "0", "-preset", "fast", "-pix_fmt", "yuv420p", tmp])
 
@@ -418,7 +466,7 @@ def make_ref(name: str, start: str, dur: int) -> dict:
     print("ref 完成：in/{} {:.1f} MiB".format(out, size / 2 ** 20))
     return {"ref": "in/{}".format(out), "ref_name": out,
             "size": size, "out_duration": _duration(tmp), "reused": False,
-            "usage": _usage(t0, 4, 4096)}
+            "src_stats": stats, "usage": _usage(t0, 4, 4096)}
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=8, memory=8192,
@@ -452,7 +500,7 @@ def sweep_one(arg: dict) -> dict:
     mark(state="done", pct=100.0, out_time=total, fps=0.0, size=size, **v, **u)
     print("crf {} → {:.1f} MiB, VMAF 平均 {:.2f} / 最低 {:.2f}".format(
         crf, size / 2 ** 20, v["vmaf_mean"], v["vmaf_min"]))
-    return dict(crf=crf, size=size, usage=u, **v)
+    return dict(crf=crf, size=size, duration=total, usage=u, **v)
 
 
 # --------------------------------------------------------------------------
@@ -527,11 +575,13 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
             # 沒給 ref 就從來源切一支（同樣的來源與長度會沿用既有的）。
             # 掃描與產生 ref 合成一個 job，按一次就能走完，不必回來按第二次。
             ref = p.get("ref")
+            src = {}
             if not ref:
                 meta(state="splitting", kind="sweep", total_chunks=len(crfs))
                 r = account("ref", make_ref.remote(name, p["start"], p["dur"]))
                 ref = r["ref"]
-                meta(ref=ref, ref_reused=r.get("reused", False))
+                src = r.get("src_stats") or {}
+                meta(ref=ref, ref_reused=r.get("reused", False), **src)
 
             meta(state="encoding", kind="sweep", total_chunks=len(crfs), ref=ref)
 
@@ -577,8 +627,24 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
                 if i:
                     r["d_vmaf"] = r["vmaf_mean"] - rows[i - 1]["vmaf_mean"]
                     r["d_size"] = r["size"] - rows[i - 1]["size"]
+                if src.get("src_seg_kbps"):
+                    r["vs_src"] = (r["size"] * 8 / (r.get("duration") or p["dur"]) / 1000
+                                   / src["src_seg_kbps"])
 
-            res = {"table": rows, "pick": pick, "ref": ref,
+            # 過門檻不代表值得轉：原片本來就壓得很省時，AV1 為了重現原片（連同它的
+            # 壓縮痕跡）得花一樣多的位元。實測 4K60 12 Mbps 的片 crf 30 才過 VMAF 95，
+            # 全片 $9.7 換來比原片還大的檔案 —— 掃描表其實早就看得出來，只是沒人比對。
+            warning = ""
+            row = next((r for r in rows if r["crf"] == pick), None)
+            if row and row.get("vs_src", 0) >= SWEEP_WORTH:
+                est = row["vs_src"] * src["src_kbps"] * 1000 * src["src_duration"] / 8
+                warning = ("crf {} 預估輸出約原片的 {:.0%}（全片約 {:.1f} GB，原片 {:.1f} GB），"
+                           "轉了幾乎不會變小。可以考慮保留原片、改用更高的 crf 並放寬門檻，"
+                           "或縮小解析度。").format(pick, row["vs_src"], est / 1e9,
+                                               src["src_bytes"] / 1e9)
+                print("注意：", warning)
+
+            res = {"table": rows, "pick": pick, "ref": ref, "warning": warning,
                    "min_mean": p["min_mean"], "min_low": p["min_low"]}
             meta(state="done", usage=totals(), **res)
             return res

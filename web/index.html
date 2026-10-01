@@ -738,6 +738,11 @@ async function startSweep() {
 document.addEventListener("click", e => {
   const b = e.target.closest("button.sweep-use");
   if (!b) return;
+  const vs = parseFloat(b.dataset.vs);
+  if (vs >= SWEEP_WORTH && !confirm(
+      `crf ${b.dataset.crf} 預估輸出約原片的 ${(vs * 100).toFixed(0)}%，轉了幾乎不會變小。
+還是要帶進送件表單嗎？`))
+    return;
   $("crf").value = b.dataset.crf;
   $("preset").value = $("swPreset").value;
   $("svt").value = $("swSvt").value;
@@ -904,7 +909,11 @@ function mergeSweeps(jobs, ref) {
   return rows;
 }
 
+// 跟 encode.py 的 SWEEP_WORTH 同一個值：預估輸出達到原片這個比例就不值得轉
+const SWEEP_WORTH = 0.9;
+
 function sweepTable(j) {
+  const pickRow = (j.table || []).find(r => r.crf === j.pick);
   const rows = (j.table || []).map(r => {
     const pass = r.vmaf_mean >= j.min_mean && r.vmaf_min >= j.min_low;
     const best = r.crf === j.pick;
@@ -916,8 +925,9 @@ function sweepTable(j) {
       <td class="num" style="color:${r.vmaf_min >= j.min_low ? "var(--ok)" : "var(--err)"}">${r.vmaf_min.toFixed(2)}</td>
       <td class="num">${r.d_vmaf == null ? "—" : r.d_vmaf.toFixed(2)}</td>
       <td class="num">${r.d_size == null ? "—" : (r.d_size / 1048576).toFixed(2) + " MiB"}</td>
+      <td class="num" style="${r.vs_src >= SWEEP_WORTH ? "color:var(--err);font-weight:700" : ""}">${r.vs_src == null ? "—" : (r.vs_src * 100).toFixed(0) + "%"}</td>
       <td class="act">
-        <button type="button" class="sweep-use" data-crf="${r.crf}"
+        <button type="button" class="sweep-use" data-crf="${r.crf}" data-vs="${r.vs_src ?? ""}"
           title="把這組參數帶進送件表單">送件</button>
         <button type="button" class="sweep-save" data-crf="${r.crf}"
           data-mean="${r.vmaf_mean.toFixed(2)}" data-low="${r.vmaf_min.toFixed(2)}"
@@ -930,8 +940,14 @@ function sweepTable(j) {
     <table><thead><tr>
       <td class="muted">參數</td><td class="num muted">體積</td><td class="num muted">平均</td>
       <td class="num muted">調和</td><td class="num muted">最低</td>
-      <td class="num muted">ΔVMAF</td><td class="num muted">Δ體積</td><td></td>
+      <td class="num muted">ΔVMAF</td><td class="num muted">Δ體積</td>
+      <td class="num muted" title="和原片同一段的視訊位元率相比">相對原片</td><td></td>
     </tr></thead><tbody>${rows}</tbody></table>
+    ${pickRow && pickRow.vs_src >= SWEEP_WORTH
+      ? `<p class="warn" style="margin:12px 0 0">建議的 crf ${j.pick} 預估輸出約原片的
+         ${(pickRow.vs_src * 100).toFixed(0)}%，轉了幾乎不會變小。原片本來就壓得很省，
+         要過這個 VMAF 門檻 AV1 得花差不多的位元。考慮保留原片、改用更高的 crf 並放寬門檻，或縮小解析度。</p>`
+      : ""}
     ${j.pick == null
       ? '<p class="warn" style="margin:12px 0 0">沒有任何 crf 同時滿足兩個門檻 —— 把階梯往下延伸（更低的 crf），或放寬門檻。</p>'
       : `<p class="muted" style="margin:12px 0 0">建議 crf ${j.pick}：過門檻之中體積最小的。
