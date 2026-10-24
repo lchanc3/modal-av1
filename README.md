@@ -40,7 +40,8 @@ start-web.bat
 - **模板** —— 各片源存一組參數，可套用與匯入匯出
 
 CLI 也可以：`submit.py` 送件、`cancel.py <call id>` 取消、`cleanup.py` 清 Volume、
-`vmaf.py <ref> [資料夾]` 本機打分。`submit.py` 和 `cleanup.py` 加 `-h` 看參數。
+`vmaf.py <ref> [資料夾]` 本機打分、`logs.bat` 看雲端 log（`last` 看最新 job、
+`--preempt` 列出被搶佔紀錄）。`submit.py`、`cleanup.py`、`logs.py` 加 `-h` 看參數。
 
 Volume `videos` 的結構：
 
