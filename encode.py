@@ -374,9 +374,27 @@ def encode_chunk(arg: dict) -> str:
     _publish(tmp, dst)
     vol.commit()
     u = _usage(t0, cpu, mem)
+    print("第 {} 段完成：{:.0f} 秒（{:.2f}x）".format(idx, u["elapsed"], total / max(u["elapsed"], 1)))
     _put_chunk(job_id, idx, state="done", pct=100.0, out_time=total, fps=0.0,
                total=total, size=os.path.getsize(tmp), reused=False, attempt=attempt, **u)
-    return {"name": out_name, "usage": u, "attempt": attempt, "reused": False}
+    return {"name": out_name, "usage": u, "attempt": attempt, "reused": False, "total": total}
+
+
+def stragglers(rows: list, factor: float = 2.5, min_el: float = 60) -> str:
+    """找出比同一個 job 其他段慢很多的段，回傳一句說明（沒有就回空字串）。
+
+    rows 是 [(段號, 片長秒數, 耗時秒數)]，沿用的段不要放進來。同一個 job 的段落
+    難度差不多，慢上好幾倍通常是分到慢機器：2026-10-25 #09 位元率普通、沒被
+    搶佔，卻跑了其他段的 7 倍。先記錄觀察，還沒有自動重跑。
+    只跑幾秒的段不算：開機和讀檔的抖動就能差好幾倍。
+    """
+    speed = [(i, secs / el, el) for i, secs, el in rows if secs and el]
+    if len(speed) < 4:
+        return ""
+    med = sorted(s for _, s, _ in speed)[len(speed) // 2]
+    slow = [(i, s) for i, s, el in speed if s * factor < med and el >= min_el]
+    return "、".join("第 {} 段速度只有中位數的 {:.0%}".format(i, s / med) for i, s in slow) + \
+        ("（可能分到慢機器）" if slow else "")
 
 
 def _run_tqdm(cmd: list, report) -> str:
@@ -894,13 +912,19 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
             raise RuntimeError("有 {} 段失敗：{}".format(
                 len(failed), "；".join("第 {} 段 {!r}".format(i, r) for i, r in failed[:3])))
 
+        # 要在 account 之前：account 會把 usage 從結果裡拿走
+        slow = stragglers([(i, r.get("total"), r["usage"]["elapsed"])
+                           for i, r in enumerate(results) if not r.get("reused")])
         for i, r in enumerate(results):
             account("chunk {}".format(i), r)
         retries = sum((r.get("attempt") or 1) - 1 for r in results)
+        if slow:
+            print("注意：", slow)
 
         meta(state="merging")
         res = account("merge", merge.remote(
             name, work, [r["name"] for r in results], p["out_name"]))
+        res["warning"] = "；".join(x for x in (res.get("warning"), slow) if x)
         meta(state="done", usage=dict(totals(), retries=retries), **res)
         return res
 
