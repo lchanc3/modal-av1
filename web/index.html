@@ -228,7 +228,7 @@
           <div><label for="preset">preset</label><input class="mono" id="preset" type="number" value="3" min="0" max="13"></div>
           <div><label for="crf">crf</label><input class="mono" id="crf" type="number" value="34" min="1" max="63"></div>
           <div><label for="gop">gop</label><input class="mono" id="gop" type="number" value="600"></div>
-          <div><label for="chunk_sec">每段秒數</label><input class="mono" id="chunk_sec" type="number" value="240"></div>
+          <div><label for="chunk_sec">每段秒數</label><input class="mono" id="chunk_sec" type="number" value="120"></div>
         </div>
 
         <div style="margin-bottom:14px">
@@ -384,7 +384,7 @@
             <div><label for="tplPreset">preset</label><input class="mono" id="tplPreset" type="number" value="3"></div>
             <div><label for="tplCrf">crf</label><input class="mono" id="tplCrf" type="number" value="34"></div>
             <div><label for="tplGop">gop</label><input class="mono" id="tplGop" type="number" value="600"></div>
-            <div><label for="tplChunk">每段秒數</label><input class="mono" id="tplChunk" type="number" value="240"></div>
+            <div><label for="tplChunk">每段秒數</label><input class="mono" id="tplChunk" type="number" value="120"></div>
             <div><label for="tplCpu">每段核心</label><input class="mono" id="tplCpu" type="number" value="8"></div>
             <div></div>
             <div><label for="tplMean">門檻・平均</label><input class="mono" id="tplMean" type="number" step="0.5" value="95"></div>
@@ -562,8 +562,22 @@ async function loadUploads() {
 
 // ---- 送件 ----------------------------------------------------------------
 $("test").onchange = e => { $("testOpts").classList.toggle("hide", !e.target.checked); estimate(); };
-$("sr").onchange = e => { $("srOpts").classList.toggle("hide", !e.target.checked); estimate(); };
-["preset","crf","chunk_sec","cpu","name","lada"].forEach(id => $(id).onchange = estimate);
+$("sr").onchange = e => { $("srOpts").classList.toggle("hide", !e.target.checked); prepChunk(); estimate(); };
+$("lada").onchange = () => { prepChunk(); estimate(); };
+["preset","crf","chunk_sec","cpu","name"].forEach(id => $(id).onchange = estimate);
+
+// 跟 jobspec.py 的 PREP_MIN_CHUNK 同一個值。開前處理時把段長拉到下限，關掉再還原。
+const PREP_MIN_CHUNK = 240;
+function prepChunk() {
+  const c = $("chunk_sec"), on = $("lada").checked || $("sr").checked;
+  c.min = on ? PREP_MIN_CHUNK : 1;
+  if (on && +c.value < PREP_MIN_CHUNK) {
+    c.dataset.before = c.value; c.value = PREP_MIN_CHUNK;
+    toast(`開了前處理，每段至少 ${PREP_MIN_CHUNK} 秒`);
+  } else if (!on && c.dataset.before) {
+    c.value = c.dataset.before; delete c.dataset.before;
+  }
+}
 
 // GPU 前處理每小時片長的花費（L4）。2026-10-24 用 800×450 24fps 的片段實測：
 // Lada 60 秒片段跑 62 秒、超分 general-x4v3 跑 79 秒。解析度、幀率越高越貴。
@@ -628,7 +642,7 @@ function resetTpl() {
   $("tplId").value = "";
   $("tplFormCap").textContent = "新增模板";
   $("tplNew").classList.add("hide");
-  const d = {name: "", note: "", preset: 3, crf: 34, gop: 600, chunk_sec: 600, cpu: 8,
+  const d = {name: "", note: "", preset: 3, crf: 34, gop: 600, chunk_sec: 120, cpu: 8,
              min_mean: 95, min_low: 89,
              svt: "tune=0:enable-overlays=1:enable-qm=1:film-grain=0"};
   for (const [id, key] of Object.entries(TPL_FIELDS)) $(id).value = d[key];
@@ -694,6 +708,7 @@ document.addEventListener("click", e => {
 function applyTpl(t) {
   $("preset").value = t.preset; $("crf").value = t.crf; $("gop").value = t.gop;
   $("chunk_sec").value = t.chunk_sec; $("cpu").value = t.cpu; $("svt").value = t.svt;
+  delete $("chunk_sec").dataset.before; prepChunk();
   $("swPreset").value = t.preset; $("swCpu").value = t.cpu; $("swSvt").value = t.svt;
   $("swMean").value = t.min_mean; $("swLow").value = t.min_low;
   showTab("encode");

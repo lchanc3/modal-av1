@@ -27,8 +27,8 @@ DEFAULTS = {
     "crf": 34,
     "gop": 600,
     "svt": BASE_SVT,
-    "chunk_sec": 240,   # 每段 4 分鐘：被搶佔的損失與段長成正比，而多出來的
-                        # 交界成本很小（實測每個交界約 10.5 KB）
+    "chunk_sec": 120,   # 每段 2 分鐘：被搶佔的損失與段長成正比，而多出來的
+                        # 交界成本很小（實測每個交界約 10.5 KB）。開前處理時至少 PREP_MIN_CHUNK
     "cpu": 8,           # 每段 8 核：SVT-AV1 超過 8 核執行緒效率下降，小容器也更好排
     "test": False,
     "start": "00:05:00",
@@ -49,6 +49,9 @@ DEFAULTS = {
     "min_low": 89.0,
     "refine": True,    # 掃完自動補掃邊界附近被階梯跳過的 crf
 }
+
+# GPU 前處理每段都要重新把模型載進 GPU，段太短時載入時間的佔比太高，L4 又比 CPU 貴
+PREP_MIN_CHUNK = 240
 
 TERMINAL = ("done", "error", "cancelled")
 
@@ -76,6 +79,11 @@ def build(name: str, **over) -> dict:
     p["sr_height"] = int(p["sr_height"])
     if p["test"] and (p["lada"] or p["sr"]):
         raise ValueError("測試片段還不支援去馬賽克／超分，請用全片模式")
+    if (p["lada"] or p["sr"]) and p["chunk_sec"] < PREP_MIN_CHUNK:
+        # 沒指定段長就自動拉到下限；明確指定得太短才算錯
+        if over.get("chunk_sec") is not None:
+            raise ValueError("開了去馬賽克／超分時，每段至少 {} 秒".format(PREP_MIN_CHUNK))
+        p["chunk_sec"] = PREP_MIN_CHUNK
 
     stem = os.path.splitext(name)[0]
 
