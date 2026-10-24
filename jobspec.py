@@ -35,6 +35,13 @@ DEFAULTS = {
     "dur": 20,
     "tag": "",
     "est_cost": 0.0,   # 送件當下的估算，完成後跟實際對照
+    # GPU 前處理，預設都關。2026-10-24 實測 accurate 與 fast 一樣快，所以預設 accurate
+    "lada": False,
+    "lada_model": "v4-accurate",
+    "sr": False,
+    "sr_model": "general-x4v3",   # 或 general-wdn-x4v3（順便降噪）
+    "sr_height": 1080,
+    "gpu": "L4",
     # 參數掃描
     "crfs": [28, 30, 32, 34, 36],
     "ref": "",
@@ -64,6 +71,11 @@ def build(name: str, **over) -> dict:
     p["test"] = bool(p["test"])
     p["est_cost"] = float(p.get("est_cost") or 0)
     p["mem"] = p["cpu"] * 1024
+    p["lada"] = bool(p["lada"])
+    p["sr"] = bool(p["sr"])
+    p["sr_height"] = int(p["sr_height"])
+    if p["test"] and (p["lada"] or p["sr"]):
+        raise ValueError("測試片段還不支援去馬賽克／超分，請用全片模式")
 
     stem = os.path.splitext(name)[0]
 
@@ -85,9 +97,11 @@ def build(name: str, **over) -> dict:
         tag = p["tag"] or "p{}_crf{}".format(p["preset"], p["crf"])
         p["out_name"] = "{}_test_{}.mkv".format(stem, tag)
     else:
-        # 全片也能給 tag，方便同一支片用不同參數各跑一次做比較而不互相覆蓋
-        p["out_name"] = ("{}_AV1_{}.mkv".format(stem, p["tag"]) if p["tag"]
-                         else "{}_AV1.mkv".format(stem))
+        # 全片也能給 tag，方便同一支片用不同參數各跑一次做比較而不互相覆蓋。
+        # 前處理的有無直接寫進檔名，開關不同的版本才不會互相覆蓋
+        prep = ("_lada" if p["lada"] else "") + ("_{}p".format(p["sr_height"]) if p["sr"] else "")
+        p["out_name"] = ("{}_AV1{}_{}.mkv".format(stem, prep, p["tag"]) if p["tag"]
+                         else "{}_AV1{}.mkv".format(stem, prep))
     return p
 
 
@@ -166,6 +180,9 @@ def read_job(d, job_id: str, snap=None) -> dict:
     all_secs = sum(c.get("total", 0.0) for c in chunks)
     if state == "done":
         pct = 100.0
+    elif state == "prepping" and total:
+        # 前處理不寫 out_time（見 encode.prep_chunk），進度另外算
+        pct = sum(c.get("prep_pct", 0.0) for c in chunks) / total
     elif all_secs and total and all(c.get("total") for c in chunks):
         pct = min(100.0, done_secs / all_secs * 100)
     elif total:

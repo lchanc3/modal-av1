@@ -598,7 +598,10 @@ async def create_job(request: Request):
     name = body.pop("name", None)
     if not name:
         raise HTTPException(400, "沒有指定來源檔")
-    params = jobspec.build(name, **body)
+    try:
+        params = jobspec.build(name, **body)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return await run_in_threadpool(jobspec.submit, name, params)
 
 

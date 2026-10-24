@@ -18,6 +18,12 @@ p.add_argument("--test", action="store_true", default=None,
                help="只轉一小段測試（真的只轉，不是只改檔名）")
 p.add_argument("--start", help="測試片段起點，預設 00:05:00")
 p.add_argument("--dur", type=int, help="測試片段長度（秒），預設 20")
+p.add_argument("--lada", action="store_true", default=None, help="先用 Lada 去馬賽克（GPU）")
+p.add_argument("--lada-model", dest="lada_model", help="偵測模型，預設 v4-accurate")
+p.add_argument("--sr", action="store_true", default=None, help="先用 Real-ESRGAN 超分（GPU）")
+p.add_argument("--sr-model", dest="sr_model", help="general-x4v3（預設）或 general-wdn-x4v3")
+p.add_argument("--sr-height", dest="sr_height", type=int, help="超分後的高度，預設 1080")
+p.add_argument("--gpu", help="前處理用的 GPU，預設 L4")
 args = p.parse_args()
 
 params = jobspec.build(**{k: v for k, v in vars(args).items()})
@@ -25,6 +31,11 @@ r = jobspec.submit(args.name, params)
 
 mode = "測試片段 {} 起 {} 秒".format(params["start"], params["dur"]) if params["test"] \
     else "全片，每段 {} 秒 × {} 核".format(params["chunk_sec"], params["cpu"])
+if params["lada"] or params["sr"]:
+    mode += "；前處理（{}）：{}".format(params["gpu"], "、".join(
+        x for x in ("去馬賽克 " + params["lada_model"] if params["lada"] else "",
+                    "超分 {} → {}p".format(params["sr_model"], params["sr_height"]) if params["sr"] else "")
+        if x))
 
 print("已送出：{} → out/{}".format(args.name, r["out_name"]))
 print("模式：  {}".format(mode))

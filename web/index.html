@@ -241,6 +241,21 @@
         </div>
 
         <div class="row" style="margin-bottom:6px">
+          <input type="checkbox" id="lada"><label for="lada" style="margin:0;color:var(--fg);font-size:13px">去馬賽克（Lada，GPU）</label>
+        </div>
+        <div class="row" style="margin-bottom:6px">
+          <input type="checkbox" id="sr"><label for="sr" style="margin:0;color:var(--fg);font-size:13px">超分（Real-ESRGAN，GPU）</label>
+        </div>
+        <div id="srOpts" class="hide grid2" style="margin-bottom:14px">
+          <div><label for="srModel">超分模型</label>
+            <select id="srModel">
+              <option value="general-x4v3">general-x4v3</option>
+              <option value="general-wdn-x4v3">general-wdn-x4v3（降噪）</option>
+            </select></div>
+          <div><label for="srHeight">輸出高度</label><input class="mono" id="srHeight" type="number" value="1080"></div>
+        </div>
+
+        <div class="row" style="margin-bottom:6px">
           <input type="checkbox" id="test"><label for="test" style="margin:0;color:var(--fg);font-size:13px">只轉測試片段</label>
         </div>
         <div id="testOpts" class="hide grid2" style="margin-bottom:14px">
@@ -547,7 +562,12 @@ async function loadUploads() {
 
 // ---- 送件 ----------------------------------------------------------------
 $("test").onchange = e => { $("testOpts").classList.toggle("hide", !e.target.checked); estimate(); };
-["preset","crf","chunk_sec","cpu","name"].forEach(id => $(id).onchange = estimate);
+$("sr").onchange = e => { $("srOpts").classList.toggle("hide", !e.target.checked); estimate(); };
+["preset","crf","chunk_sec","cpu","name","lada"].forEach(id => $(id).onchange = estimate);
+
+// GPU 前處理每小時片長的花費（L4）。2026-10-24 用 800×450 24fps 的片段實測：
+// Lada 60 秒片段跑 62 秒、超分 general-x4v3 跑 79 秒。解析度、幀率越高越貴。
+const PREP_PER_HR = {lada: 1.4, sr: 1.8};
 
 // 跟 encode.py 的 RATE_CPU_S / RATE_MEM_S 同一組值，改的時候兩邊要一起改。
 // 那邊的註解寫了這兩個數字是怎麼從帳單回歸出來的。
@@ -565,12 +585,15 @@ function estimate() {
   const speed = 0.5 * (cpu / 16) * 1.35;        // 16 核 preset 3 實測 0.5x，核心少時效率略高
   const n = Math.max(1, Math.ceil(dur / chunk));
   const hrs = (dur / speed) / 3600;
-  const cost = hrs * rateHr(cpu);
+  const prep = (($("lada").checked ? PREP_PER_HR.lada : 0) + ($("sr").checked ? PREP_PER_HR.sr : 0))
+               * dur / 3600;
+  const cost = hrs * rateHr(cpu) + prep;
   window._estCost = cost;
   const b = window._budget;
   const after = b ? b.remaining - cost : null;
   $("estimate").innerHTML =
     `<span style="opacity:.7">以 1 小時片長估</span>　${n} 段　·　約 ${hhmmss(Math.min(chunk, dur) / speed)}<br>` +
+    (prep ? `<span style="opacity:.7">含 GPU 前處理約 $${prep.toFixed(2)}（以 450p 24fps 估）</span><br>` : "") +
     `<span style="color:var(--accent);font-weight:500" class="mono">≈ $${cost.toFixed(2)}</span>` +
     (after === null ? "" :
       `<span class="mono" style="color:${after < 0 ? "var(--err)" : "var(--dim)"}">` +
@@ -584,7 +607,10 @@ async function submitJob() {
     chunk_sec: +$("chunk_sec").value, cpu: +$("cpu").value, svt: $("svt").value,
     test: $("test").checked, start: $("start").value, dur: +$("dur").value,
     tag: $("tag").value || "", est_cost: window._estCost || 0,
+    lada: $("lada").checked, sr: $("sr").checked,
+    sr_model: $("srModel").value, sr_height: +$("srHeight").value,
   };
+  if (body.test && (body.lada || body.sr)) return toast("測試片段還不支援去馬賽克／超分", true);
   if (!body.name) return toast("先選一個來源檔", true);
   $("go").disabled = true;
   if (await send("/api/jobs", {
@@ -796,6 +822,7 @@ sweepEstimate();
 // ---- 工作 ----------------------------------------------------------------
 const STATE = {
   queued:    ["排隊中", "idle"], splitting: ["切段中", "run"],
+  prepping:  ["前處理中", "run"],
   encoding:  ["編碼中", "run"],  merging:   ["合併中", "run"],
   done:      ["完成",   "done"], error:     ["失敗",   "err"],
   cancelled: ["已取消", "idle"],
@@ -808,8 +835,9 @@ function chunkCells(j) {
     const done = c.state === "done";
     const redo = c.state === "encoding" && c.pct < 8 && (j.pct || 0) > 25;
     const col = done ? "var(--ok)" : redo ? "var(--err)" : "var(--accent)";
+    const pre = {lada: "去碼 ", upscaling: "超分 "}[c.state] || "";
     const txt = done ? "100%" : c.state === "waiting" ? "—"
-              : c.state === "scoring" ? "打分" : (c.pct || 0).toFixed(0) + "%";
+              : c.state === "scoring" ? "打分" : pre + (c.pct || 0).toFixed(0) + "%";
     const lbl = c.crf != null ? "crf " + c.crf : "#" + String(c.idx).padStart(2, "0");
     return `<div class="chunk">
       <div class="lbl"><span>${lbl}</span><span style="color:${col}">${txt}</span></div>

@@ -1,4 +1,6 @@
-"""Modal 端 AV1 轉檔：切段 → 平行編碼 → 合併。
+"""Modal 端 AV1 轉檔：切段 →（可選）GPU 前處理 → 平行編碼 → 合併。
+
+前處理是去馬賽克（Lada）與超分（Real-ESRGAN），預設都關閉；關閉時流程與以前完全相同。
 
 部署： modal deploy encode.py
 送件： python submit.py <檔名>  或啟動 web/server.py
@@ -14,6 +16,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -33,6 +36,28 @@ image = (modal.Image.debian_slim()
         " && ln -s /opt/ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/ffprobe"))
 
 driver_image = modal.Image.debian_slim()
+
+# GPU 前處理（去馬賽克 Lada、超分 Real-ESRGAN）用的 image。直接拿 Lada 官方 image：
+# PyTorch、模型權重、含 NVENC 的 ffmpeg 都在裡面，超分只要再補 spandrel 和權重。
+# 版本釘死，latest 換版時行為才不會悄悄改變。
+# image 是用 lada 使用者裝的（套件在它的 user site），Modal 以 root 執行，
+# 所以要自己把套件路徑、模型位置、PATH 指回去。
+LADA_SITE = "/home/lada/.local/lib/python3.13/site-packages"
+SR_DIR = "/sr"
+SR_MODELS = {
+    "general-x4v3": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth",
+    "general-wdn-x4v3": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-wdn-x4v3.pth",
+}
+gpu_image = (modal.Image.from_registry("ladaapp/lada:v0.11.0")
+    .entrypoint([])
+    .run_commands(
+        "python -m pip install --no-cache-dir --no-deps --target {}/py spandrel==0.4.1 einops safetensors".format(SR_DIR),
+        *["python -c \"import urllib.request as u; u.urlretrieve('{}', '{}/{}.pth')\"".format(url, SR_DIR, k)
+          for k, url in SR_MODELS.items()])
+    .env({"PYTHONPATH": "{}:{}/py".format(LADA_SITE, SR_DIR),
+          "LADA_MODEL_WEIGHTS_DIR": "/model_weights",
+          "LOCALE_DIR": LADA_SITE + "/lada/locale",
+          "PATH": "/home/lada/.local/bin:/usr/local/bin:/usr/bin:/bin"}))
 
 BASE_SVT = "tune=0:enable-overlays=1:enable-qm=1:film-grain=0"
 
@@ -61,8 +86,13 @@ SWEEP_WORTH = 0.9
 RATE_CPU_S = 0.0000262      # 美元 / 實體核心 / 秒
 RATE_MEM_S = 0.00000276     # 美元 / GiB / 秒
 
+# GPU 牌價（美元 / 秒）。GPU 容器的 CPU 與記憶體沿用上面的迴歸費率，
+# 實測會高估：2026-10-24 L4 + 4 核 + 16 GiB 的超分測試算出 $0.54，帳單 $0.46。
+GPU_RATE_S = {"T4": 0.000164, "L4": 0.000222, "A10": 0.000306, "L40S": 0.000542}
 
-def _usage(t0: float, cpu: float, mem_mib: int, nonpreemptible: bool = False) -> dict:
+
+def _usage(t0: float, cpu: float, mem_mib: int, nonpreemptible: bool = False,
+           gpu: str = "") -> dict:
     """一個階段實際用掉的資源與費用。
 
     elapsed 只是函式體內的時間，但費率已經把容器開機與重跑攤進去了（見上面
@@ -70,8 +100,8 @@ def _usage(t0: float, cpu: float, mem_mib: int, nonpreemptible: bool = False) ->
     要看真正的牆鐘請用 driver 的 wall。
     """
     el = time.time() - t0
-    rate = cpu * RATE_CPU_S + (mem_mib / 1024.0) * RATE_MEM_S
-    return {"elapsed": round(el, 1), "cpu": cpu, "mem": mem_mib,
+    rate = cpu * RATE_CPU_S + (mem_mib / 1024.0) * RATE_MEM_S + GPU_RATE_S.get(gpu, 0.0)
+    return {"elapsed": round(el, 1), "cpu": cpu, "mem": mem_mib, "gpu": gpu,
             "cost": round(rate * el * (3 if nonpreemptible else 1), 5)}
 
 
@@ -88,9 +118,26 @@ def work_dir(name: str, chunk_sec: int) -> str:
     return "/data/work/{}".format(_key(name, chunk_sec))
 
 
+def prep_on(p: dict) -> bool:
+    return bool(p.get("lada") or p.get("sr"))
+
+
+def prep_key(p: dict) -> str:
+    """前處理結果只看前處理的參數。"""
+    return _key("prep", p.get("lada") and p.get("lada_model"),
+                p.get("sr") and p.get("sr_model"), p.get("sr") and p.get("sr_height"))
+
+
 def enc_key(p: dict) -> str:
-    """編碼結果還要看編碼參數 —— 改了 crf 就不該沿用舊的段落。"""
-    return _key(p["preset"], p["crf"], p["gop"], p["svt"])
+    """編碼結果還要看編碼參數 —— 改了 crf 就不該沿用舊的段落。
+
+    有前處理時，餵進來的畫面不同，所以前處理的 key 也要算進去。
+    沒有前處理時刻意不加，舊的段落照樣沿用得到。
+    """
+    parts = [p["preset"], p["crf"], p["gop"], p["svt"]]
+    if prep_on(p):
+        parts.append(prep_key(p))
+    return _key(*parts)
 
 
 # --------------------------------------------------------------------------
@@ -296,7 +343,8 @@ def encode_chunk(arg: dict) -> str:
         print("第 {} 段第 {} 次嘗試（前一次被中斷）".format(idx, attempt))
 
     total = _duration("{}/{}".format(work, src))
-    out_name = "enc_{}_{}".format(key, src[len("src_"):])
+    # 有前處理時 src 是 prep_*，段號另外從 part 帶進來
+    out_name = "enc_{}_{}".format(key, arg.get("part") or src[len("src_"):])
     dst = "{}/{}".format(work, out_name)
 
     if os.path.exists(dst):
@@ -329,6 +377,159 @@ def encode_chunk(arg: dict) -> str:
     _put_chunk(job_id, idx, state="done", pct=100.0, out_time=total, fps=0.0,
                total=total, size=os.path.getsize(tmp), reused=False, attempt=attempt, **u)
     return {"name": out_name, "usage": u, "attempt": attempt, "reused": False}
+
+
+def _run_tqdm(cmd: list, report) -> str:
+    """跑一個用 tqdm 印進度的程式（lada-cli），每 5 秒回報一次百分比。
+
+    tqdm 用 \\r 覆寫同一行，所以按位元組讀、自己切行。回傳輸出的尾巴供除錯。
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    buf, tail, last = b"", b"", 0.0
+    while True:
+        b = proc.stdout.read(4096)
+        if not b:
+            break
+        buf += b
+        tail = (tail + b)[-8000:]
+        *lines, buf = re.split(rb"[\r\n]", buf)
+        now = time.time()
+        if now - last < 5:
+            continue
+        for line in reversed(lines):
+            m = re.search(rb"(\d+)%\|", line)
+            if m:
+                last = now
+                report(float(m.group(1)))
+                break
+    proc.wait()
+    out = tail.decode("utf-8", "replace")
+    if proc.returncode != 0:
+        raise RuntimeError("{} 失敗（{}）：\n{}".format(cmd[0], proc.returncode, out[-4000:]))
+    return out
+
+
+def _upscale(src: str, dst: str, model: str, out_h: int, report, batch: int = 4) -> None:
+    """Real-ESRGAN 4× 放大後縮到 out_h，寫成高畫質的中間檔。
+
+    中間檔之後還要再壓一次 AV1，所以用 x264 crf 14 盡量不丟東西；
+    veryfast 是因為這一步的瓶頸在 GPU，CPU 編碼跟得上就好。
+    """
+    import numpy as np
+    import spandrel
+    import torch
+    import torch.nn.functional as F
+
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
+                        "-show_entries", "stream=width,height,r_frame_rate,nb_read_packets",
+                        "-of", "csv=p=0", src], capture_output=True, text=True, check=True)
+    w, h, fps, frames = r.stdout.strip().split(",")[:4]
+    w, h, frames = int(w), int(h), int(frames)
+    ow, oh = round(w * out_h / h / 2) * 2, out_h
+
+    desc = spandrel.ModelLoader().load_from_file("{}/{}.pth".format(SR_DIR, model))
+    desc.cuda().eval()
+    half = desc.supports_half
+    if half:
+        desc.model.half()
+
+    # passthrough：rawvideo 輸出預設會依時間戳補幀或丟幀，實測 1456 幀進、1458 幀出，
+    # 段落長度一變，合併後就跟原片的音軌對不齊
+    dec = subprocess.Popen(["ffmpeg", "-v", "error", "-i", src, "-fps_mode", "passthrough",
+                            "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
+    enc = subprocess.Popen(["ffmpeg", "-v", "error", "-y",
+                            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "{}x{}".format(ow, oh),
+                            "-r", fps, "-i", "-", "-c:v", "libx264", "-crf", "14",
+                            "-preset", "veryfast", "-pix_fmt", "yuv420p", dst],
+                           stdin=subprocess.PIPE)
+    size, n, last = w * h * 3, 0, 0.0
+    while True:
+        buf = []
+        for _ in range(batch):
+            b = dec.stdout.read(size)
+            if len(b) < size:
+                break
+            buf.append(np.frombuffer(b, np.uint8).reshape(h, w, 3))
+        if not buf:
+            break
+        x = torch.from_numpy(np.stack(buf)).cuda().permute(0, 3, 1, 2)
+        x = x.half() / 255 if half else x.float() / 255
+        with torch.inference_mode():
+            y = F.interpolate(desc(x).float(), size=(oh, ow), mode="bicubic", antialias=True)
+        y = (y.clamp(0, 1) * 255).round().byte().permute(0, 2, 3, 1).contiguous().cpu().numpy()
+        enc.stdin.write(y.tobytes())
+        n += len(buf)
+        if time.time() - last >= 5:
+            last = time.time()
+            report(min(100.0, n / frames * 100) if frames else 0.0)
+    enc.stdin.close()
+    if enc.wait() != 0 or dec.wait() != 0:
+        raise RuntimeError("超分失敗：ffmpeg 結束碼 dec={} enc={}".format(dec.returncode, enc.returncode))
+
+
+@app.function(image=gpu_image, volumes={"/data": vol}, gpu="L4", cpu=4, memory=8192,
+              timeout=6 * HOUR, retries=2)
+def prep_chunk(arg: dict) -> dict:
+    """GPU 前處理一段：去馬賽克 → 超分，兩者都可選。結果交給 encode_chunk。
+
+    跟 encode_chunk 一樣靠檔名續跑、先寫 /tmp 再 _publish。
+    進度寫進同一個 chunk key，但不寫 attempt / out_time：encode_chunk 用 attempt
+    判斷自己是不是被搶佔後重跑，用 out_time 算整體進度，前處理碰了會讓兩邊都誤判。
+    """
+    t0 = time.time()
+    job_id, idx, src, p = arg["job_id"], arg["idx"], arg["src"], arg["params"]
+    work, key, part = arg["work"], arg["prep_key"], arg["part"]
+    gpu = p.get("gpu") or "L4"
+    vol.reload()
+
+    src_path = "{}/{}".format(work, src)
+    total = _duration(src_path)
+    out_name = "prep_{}_{}".format(key, part)
+    dst = "{}/{}".format(work, out_name)
+
+    if os.path.exists(dst):
+        try:
+            if abs(_duration(dst) - total) < 0.1:
+                print("沿用第 {} 段前處理".format(idx))
+                u = _usage(t0, 4, 8192, gpu=gpu)
+                _put_chunk(job_id, idx, state="prepped", pct=100.0, prep_pct=100.0, total=total)
+                return {"name": out_name, "usage": u, "reused": True}
+            print("第 {} 段前處理長度不符，重做".format(idx))
+        except Exception as e:
+            print("第 {} 段前處理檢查失敗，重做：{!r}".format(idx, e))
+
+    # 兩步都做時各佔一半進度
+    steps = [s for s in ("lada", "sr") if p.get(s)]
+
+    def reporter(step):
+        i = steps.index(step)
+        state = "lada" if step == "lada" else "upscaling"
+
+        def report(pct):
+            whole = (i * 100 + pct) / len(steps)
+            _put_chunk(job_id, idx, state=state, pct=whole, prep_pct=whole, total=total)
+        return report
+
+    cur = src_path
+    if p.get("lada"):
+        reporter("lada")(0.0)
+        out = "/tmp/lada_{}.mp4".format(part)
+        _run_tqdm(["lada-cli", "--input", cur, "--output", out,
+                   "--mosaic-detection-model", p.get("lada_model") or "v4-accurate",
+                   "--encoding-preset", "hevc-nvidia-gpu-uhq"], reporter("lada"))
+        cur = out
+    if p.get("sr"):
+        reporter("sr")(0.0)
+        out = "/tmp/sr_{}.mkv".format(part)
+        _upscale(cur, out, p.get("sr_model") or "general-x4v3",
+                 int(p.get("sr_height") or 1080), reporter("sr"))
+        cur = out
+
+    _publish(cur, dst)
+    vol.commit()
+    u = _usage(t0, 4, 8192, gpu=gpu)
+    _put_chunk(job_id, idx, state="prepped", pct=100.0, prep_pct=100.0, total=total)
+    return {"name": out_name, "usage": u, "reused": False}
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=4, memory=4096,
@@ -650,6 +851,8 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
             return res
 
         if p.get("test"):
+            if prep_on(p):
+                raise ValueError("測試片段還不支援去馬賽克／超分，請用全片模式")
             meta(state="encoding", total_chunks=1)
             res = account("clip", encode_clip.with_options(cpu=cpu, memory=mem).remote(
                 job_id, name, p, p["out_name"]))
@@ -659,11 +862,30 @@ def run_job(job_id: str, name: str, p: dict) -> dict:
         meta(state="splitting")
         sp = account("split", split.remote(name, p["chunk_sec"]))
         work, parts = sp["work"], sp["parts"]
+        nums = [s[len("src_"):] for s in parts]
+
+        srcs = parts
+        if prep_on(p):
+            meta(state="prepping", total_chunks=len(parts), split_reused=sp["reused"])
+            pk = prep_key(p)
+            pargs = [{"job_id": job_id, "idx": i, "src": s, "part": nums[i], "params": p,
+                      "work": work, "prep_key": pk} for i, s in enumerate(parts)]
+            pres = list(prep_chunk.with_options(gpu=p.get("gpu") or "L4").map(
+                pargs, return_exceptions=True))
+            failed = [(i, r) for i, r in enumerate(pres) if isinstance(r, Exception)]
+            if failed:
+                raise RuntimeError("前處理有 {} 段失敗：{}".format(
+                    len(failed), "；".join("第 {} 段 {!r}".format(i, r) for i, r in failed[:3])))
+            for i, r in enumerate(pres):
+                account("prep {}".format(i), r)
+            srcs = [r["name"] for r in pres]
+
         meta(state="encoding", total_chunks=len(parts), split_reused=sp["reused"])
 
         k = enc_key(p)
-        args = [{"job_id": job_id, "idx": i, "src": s, "params": p, "work": work, "enc_key": k}
-                for i, s in enumerate(parts)]
+        args = [{"job_id": job_id, "idx": i, "src": s, "part": nums[i], "params": p,
+                 "work": work, "enc_key": k}
+                for i, s in enumerate(srcs)]
         results = list(encode_chunk.with_options(cpu=cpu, memory=mem).map(
             args, return_exceptions=True))
 
