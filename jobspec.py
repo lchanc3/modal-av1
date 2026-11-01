@@ -159,7 +159,23 @@ def snapshot(d) -> dict:
     單次 get 約 0.47s，而整個 Dict 一次抓完只要約 2s。逐 key 讀的話，
     9 個 job 要 40 幾次 round-trip、超過 13 秒，網頁根本輪詢不動。
     """
-    return {k: v for k, v in d.items()}
+    try:
+        return {k: v for k, v in d.items()}
+    except Exception:
+        # 長時間閒置後 gRPC 連線偶爾被伺服器 GOAWAY 掉，重來一次通常就好
+        return {k: v for k, v in d.items()}
+
+
+def prune_index(d, gone) -> None:
+    """把記錄已不存在的 job 從索引拿掉。
+
+    Modal Dict 的 key 閒置 7 天就會過期，jobs:index 每次送件都會重寫所以活著，
+    但舊 job 的 key 早就沒了 —— 不清掉的話網頁會出現一排名稱是「?」的排隊中。
+    送件時是先寫 submit 再加進索引，所以索引裡有、submit 沒有的一定是真的不見了。
+    """
+    gone = set(gone)
+    if gone:
+        d.put("jobs:index", [j for j in (d.get("jobs:index") or []) if j not in gone])
 
 
 def read_job(d, job_id: str, snap=None) -> dict:

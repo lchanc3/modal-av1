@@ -609,13 +609,17 @@ async def create_job(request: Request):
 def list_jobs():
     d = jd()
     snap = jobspec.snapshot(d)          # 一次 round-trip，而不是每個 job 好幾次
-    out = []
+    out, gone = [], []
     for jid in reversed(snap.get("jobs:index") or []):
+        if "job:{}:submit".format(jid) not in snap:
+            gone.append(jid)         # 記錄已過期（Dict 閒置 7 天會清掉）
+            continue
         j = jobspec.read_job(d, jid, snap)
         if j["state"] in jobspec.TERMINAL:
             j.pop("chunks", None)    # 已結束的不需要每段明細
         _mark_stale(j)               # 快照已含每段資料，進行中的直接帶著，不多花 round-trip
         out.append(j)
+    jobspec.prune_index(d, gone)
     return out
 
 
