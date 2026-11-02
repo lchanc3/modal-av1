@@ -115,6 +115,8 @@
      落在不同位置。掃描表有六個 .num 欄位，套上去會把第一欄擠到折行。 */
   table.files td.num { width: 110px; }
   table.files td.act { width: 126px; }
+  /* 檔名常是一長串沒有空格的英文加點，不讓它斷就會把表格撐出卡片 */
+  table.files td:first-child { overflow-wrap: anywhere; }
 
   .days { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin-top: 16px; }
   .days > div { flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
@@ -843,12 +845,16 @@ const STATE = {
   cancelled: ["已取消", "idle"],
 };
 
+// 被搶佔重跑時 encode_chunk 會把 attempt 加一。以前用「這段進度很低、整體已過 25%」
+// 來猜，沿用了大部分段落、只剩一段要編的時候會誤判成搶佔。
+const isRedo = c => c.state === "encoding" && (c.attempt || 1) > 1;
+
 function chunkCells(j) {
   const cs = j.chunks || [];
   if (cs.length < 2) return "";
   const cells = cs.map(c => {
     const done = c.state === "done";
-    const redo = c.state === "encoding" && c.pct < 8 && (j.pct || 0) > 25;
+    const redo = isRedo(c);
     const col = done ? "var(--ok)" : redo ? "var(--err)" : "var(--accent)";
     const pre = {lada: "去碼 ", upscaling: "超分 "}[c.state] || "";
     const txt = done ? "100%" : c.state === "waiting" ? "—"
@@ -859,7 +865,7 @@ function chunkCells(j) {
       <div class="bar"><i style="width:${c.pct||0}%;background:${col}"></i></div>
     </div>`;
   }).join("");
-  const redoing = cs.filter(c => c.state === "encoding" && c.pct < 8 && (j.pct || 0) > 25).length;
+  const redoing = cs.filter(isRedo).length;
   const note = redoing
     ? `<div class="row" style="margin-top:14px;font-size:11.5px;color:var(--err)">${ICON_RETRY}
          <span>有 ${redoing} 段被搶佔，正在重跑（只賠掉那一段）</span></div>`

@@ -151,6 +151,20 @@ def _duration(path: str) -> float:
     return float(r.stdout.strip())
 
 
+def _span(path: str) -> float:
+    """實際內容長度：duration 扣掉 start_time。
+
+    來源帶 edit list 時，切出來的第一段從 0.067s 之類的地方開始，ffprobe 的
+    duration 會連開頭那段空白一起算；編碼後的檔案從 0 開始，直接比長度會差一截。
+    """
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=start_time,duration",
+                        "-of", "json", path],
+                       capture_output=True, text=True, check=True)
+    fmt = json.loads(r.stdout)["format"]
+    start = fmt.get("start_time")
+    return float(fmt["duration"]) - (float(start) if start not in (None, "N/A") else 0.0)
+
+
 def _sub_codecs(path: str) -> list:
     """各條字幕的格式，順序跟 -map 0:s 一樣。"""
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "s",
@@ -350,14 +364,14 @@ def encode_chunk(arg: dict) -> str:
     if attempt > 1:
         print("第 {} 段第 {} 次嘗試（前一次被中斷）".format(idx, attempt))
 
-    total = _duration("{}/{}".format(work, src))
+    total = _span("{}/{}".format(work, src))
     # 有前處理時 src 是 prep_*，段號另外從 part 帶進來
     out_name = "enc_{}_{}".format(key, arg.get("part") or src[len("src_"):])
     dst = "{}/{}".format(work, out_name)
 
     if os.path.exists(dst):
         try:
-            if abs(_duration(dst) - total) < 0.05:
+            if abs(_span(dst) - total) < 0.05:
                 print("沿用第 {} 段".format(idx))
                 u = _usage(t0, cpu, mem)
                 _put_chunk(job_id, idx, state="done", pct=100.0, out_time=total,
@@ -509,13 +523,13 @@ def prep_chunk(arg: dict) -> dict:
     vol.reload()
 
     src_path = "{}/{}".format(work, src)
-    total = _duration(src_path)
+    total = _span(src_path)
     out_name = "prep_{}_{}".format(key, part)
     dst = "{}/{}".format(work, out_name)
 
     if os.path.exists(dst):
         try:
-            if abs(_duration(dst) - total) < 0.1:
+            if abs(_span(dst) - total) < 0.1:
                 print("沿用第 {} 段前處理".format(idx))
                 u = _usage(t0, 4, 8192, gpu=gpu)
                 _put_chunk(job_id, idx, state="prepped", pct=100.0, prep_pct=100.0, total=total)
