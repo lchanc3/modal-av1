@@ -151,6 +151,14 @@ def _duration(path: str) -> float:
     return float(r.stdout.strip())
 
 
+def _sub_codecs(path: str) -> list:
+    """各條字幕的格式，順序跟 -map 0:s 一樣。"""
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "s",
+                        "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", path],
+                       capture_output=True, text=True, check=True)
+    return r.stdout.split()
+
+
 def _secs(t) -> float:
     """'00:05:00'、'5:00'、'300'、300 → 秒。"""
     s = 0.0
@@ -564,10 +572,17 @@ def merge(name: str, work: str, enc_files: list, out_name: str) -> dict:
     _run(["ffmpeg", "-hide_banner", "-y", "-f", "concat", "-safe", "0",
           "-i", "/tmp/list.txt", "-c", "copy", "/tmp/video.mkv"])
 
+    # mp4 的 mov_text 字幕 mkv 裝不下，只有這種轉成 srt；ASS、PGS 等照樣直接複製
+    sub_args = []
+    for i, c in enumerate(_sub_codecs("/data/in/{}".format(name))):
+        if c == "mov_text":
+            sub_args += ["-c:s:{}".format(i), "srt"]
+
     # 1:a? / 1:s? 的問號：來源沒有該類串流時不報錯
     _run(["ffmpeg", "-hide_banner", "-y", "-i", "/tmp/video.mkv",
           "-i", "/data/in/{}".format(name),
-          "-map", "0:v:0", "-map", "1:a?", "-map", "1:s?", "-c", "copy", "/tmp/final.mkv"])
+          "-map", "0:v:0", "-map", "1:a?", "-map", "1:s?", "-c", "copy", *sub_args,
+          "/tmp/final.mkv"])
 
     src_d = _duration("/data/in/{}".format(name))
     out_d = _duration("/tmp/final.mkv")
